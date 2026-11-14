@@ -65,3 +65,4 @@ services:
 volumes:
   vme_postgres_data:
   vme_redis_data:
+

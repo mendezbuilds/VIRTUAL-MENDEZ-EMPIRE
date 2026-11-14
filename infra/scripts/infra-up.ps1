@@ -1,4 +1,4 @@
-﻿# VIRTUAL MENDEZ EMPIRE — Start Core Infrastructure Stack
+# VIRTUAL MENDEZ EMPIRE — Start Core Infrastructure Stack
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dockerComposeFile = Join-Path $scriptDir "..\docker\docker-compose.yml"
 
@@ -22,3 +22,4 @@ if (-not $healthy) {
 }
 
 docker compose -f $dockerComposeFile ps
+

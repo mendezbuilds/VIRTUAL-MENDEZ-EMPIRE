@@ -23,3 +23,4 @@ export class ModelGateway {
     return adapter.complete(request);
   }
 }
+

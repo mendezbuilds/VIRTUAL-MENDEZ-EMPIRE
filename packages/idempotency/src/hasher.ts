@@ -9,3 +9,4 @@ export function hashPayload(payload: unknown): string {
   const canonicalString = JSON.stringify(payload, Object.keys(payload as object).sort());
   return createHash('sha256').update(canonicalString).digest('hex');
 }
+

@@ -129,3 +129,4 @@ describe('@vme/security-governance Multi-Tier Circuit Breaker & Governance', () 
     expect(() => security.assertPermission(ownerContext, 'ledger:transfer')).not.toThrow();
   });
 });
+

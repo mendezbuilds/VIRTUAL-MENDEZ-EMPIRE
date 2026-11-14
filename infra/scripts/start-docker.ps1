@@ -1,4 +1,4 @@
-﻿# VIRTUAL MENDEZ EMPIRE — Docker Desktop Launcher & Daemon Verifier
+# VIRTUAL MENDEZ EMPIRE — Docker Desktop Launcher & Daemon Verifier
 Write-Host ">>> Initializing Docker Desktop for Virtual Mendez Empire..." -ForegroundColor Cyan
 
 $dockerDesktopPath = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
@@ -40,3 +40,4 @@ if (-not $ready) {
     Write-Warning "Docker daemon took longer than expected to initialize. Please check Docker Desktop GUI."
     exit 1
 }
+

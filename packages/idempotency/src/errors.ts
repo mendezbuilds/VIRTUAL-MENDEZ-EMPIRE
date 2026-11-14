@@ -26,3 +26,4 @@ export class IdempotencyConcurrentConflictError extends IdempotencyError {
     this.name = 'IdempotencyConcurrentConflictError';
   }
 }
+

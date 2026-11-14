@@ -50,3 +50,4 @@ export const EmployeeRoleSchema = z.object({
 });
 
 export type EmployeeRole = z.infer<typeof EmployeeRoleSchema>;
+

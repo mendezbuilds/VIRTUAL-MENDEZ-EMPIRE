@@ -97,3 +97,4 @@ export function verifyJournalIntegrity(entries: JournalEntry[]): {
 
   return { isValid: true };
 }
+

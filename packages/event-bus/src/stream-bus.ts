@@ -79,3 +79,4 @@ export class StreamBus {
     return this.consumerOffsets.get(`${groupId}:${streamId}`) ?? 0;
   }
 }
+

@@ -39,3 +39,4 @@ export class HashChainCorruptionError extends LedgerError {
     this.name = 'HashChainCorruptionError';
   }
 }
+

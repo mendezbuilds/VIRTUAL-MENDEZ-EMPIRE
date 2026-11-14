@@ -24,3 +24,4 @@ export function formatFromMicroUnits(units: bigint): string {
   const finalFrac = trimmed.length < 2 ? trimmed.padEnd(2, '0') : trimmed;
   return `${isNegative ? '-' : ''}${whole.toString()}.${finalFrac}`;
 }
+

@@ -176,6 +176,85 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@24.19.2)
 
+  packages/agent-communication:
+    dependencies:
+      '@vme/department-hierarchy':
+        specifier: workspace:*
+        version: link:../department-hierarchy
+      '@vme/security-governance':
+        specifier: workspace:*
+        version: link:../security-governance
+      '@vme/shared-types':
+        specifier: workspace:*
+        version: link:../shared-types
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/agent-memory:
+    dependencies:
+      '@vme/shared-types':
+        specifier: workspace:*
+        version: link:../shared-types
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/autonomy-engine:
+    dependencies:
+      '@vme/agent-communication':
+        specifier: workspace:*
+        version: link:../agent-communication
+      '@vme/agent-memory':
+        specifier: workspace:*
+        version: link:../agent-memory
+      '@vme/department-hierarchy':
+        specifier: workspace:*
+        version: link:../department-hierarchy
+      '@vme/orchestrator':
+        specifier: workspace:*
+        version: link:../../services/orchestrator
+      '@vme/performance-management':
+        specifier: workspace:*
+        version: link:../performance-management
+      '@vme/security-governance':
+        specifier: workspace:*
+        version: link:../security-governance
+      '@vme/shared-types':
+        specifier: workspace:*
+        version: link:../shared-types
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/department-hierarchy:
+    dependencies:
+      '@vme/security-governance':
+        specifier: workspace:*
+        version: link:../security-governance
+      '@vme/shared-types':
+        specifier: workspace:*
+        version: link:../shared-types
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
   packages/event-bus:
     dependencies:
       '@vme/shared-types':
@@ -204,6 +283,22 @@ importers:
 
   packages/ledger-core:
     dependencies:
+      '@vme/shared-types':
+        specifier: workspace:*
+        version: link:../shared-types
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/performance-management:
+    dependencies:
+      '@vme/department-hierarchy':
+        specifier: workspace:*
+        version: link:../department-hierarchy
       '@vme/shared-types':
         specifier: workspace:*
         version: link:../shared-types

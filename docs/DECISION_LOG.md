@@ -54,3 +54,38 @@
   4. Tier 4: Independent OS watchdog process that kills unresponsive worker processes.
   5. Financial order protocol: When emergency halt triggers, orders transition to `PENDING_CANCELLATION`, and the system enters an active query loop with the broker/exchange until positive confirmation is received before settling state.
 - **Consequences:** Redundant, multi-layered fail-safe system preventing runaway agent behavior or unhedged financial losses.
+
+---
+
+## ADR-006: Multi-Currency Support for Nigerian Naira (NGN)
+- **Status:** APPROVED (Owner Directive)
+- **Context:** The Owner directed adding `NGN` (Nigerian Naira) as an authorized currency while preserving `USD` as base reporting treasury currency.
+- **Decision:** Added `NGN` to `CurrencyCodeSchema`. The double-entry engine independently balances transactions per currency with zero cross-currency float leakage.
+- **Consequences:** Enables Nigerian domestic operations, remittances, and dual-currency budgeting without compromising strict ledger zero-sum invariants.
+
+---
+
+## ADR-007: Corporate Department Hierarchy & 22-Agent Workforce
+- **Status:** APPROVED
+- **Context:** The virtual company requires a real corporate structure with 9 departments, executive leadership, and functional specializations.
+- **Decision:** Established 9 distinct departments with designated Directors and 22 initial specialized AI agents. Enforced hierarchical delegation rules where superiors delegate to subordinates, and cross-department requests require Director-level authority.
+- **Consequences:** Eliminates chaotic uncoordinated agent meshes; establishes clear chains of command, accountability, and departmental budget controls.
+
+---
+
+## ADR-008: Tri-Tier Persistent Memory Architecture
+- **Status:** APPROVED
+- **Context:** AI agents need short-term task scratchpads, institutional execution logs, and searchable domain knowledge.
+- **Decision:** Implemented a tri-tier architecture:
+  1. Working Memory: Task-scoped scratchpads.
+  2. Episodic Memory: Searchable audit logs of every completed task, decision rationale, and lesson learned.
+  3. Semantic Memory: Cosine similarity vector search over company guidelines and domain knowledge.
+- **Consequences:** Prevents context window exhaustion while maintaining cross-turn organizational knowledge.
+
+---
+
+## ADR-009: Strict Owner Authorization Barrier for Consequential Submissions
+- **Status:** APPROVED
+- **Context:** While the workforce must operate independently, the Owner remains the ultimate authority. Consequential actions (outreach emails, legal contracts, live trades) must never be sent without Owner sign-off.
+- **Decision:** The Autonomy Engine and Delegation Manager automatically intercept any task flagged as consequential (`EXTERNAL_OUTREACH`, `LIVE_TRADING`, `CAPITAL_TRANSFER`, `BINDING_CONTRACT`), transition its state to `WAITING_FEEDBACK`, and register an explicit authorization request in the Owner queue.
+- **Consequences:** Guarantees Owner safety and total governance compliance with zero chance of autonomous rogue communications.

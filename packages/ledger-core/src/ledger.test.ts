@@ -203,3 +203,4 @@ describe('@vme/ledger-core Hardened Double-Entry Ledger', () => {
     await expect(ledger.verifyChain(tenantId)).rejects.toThrow(HashChainCorruptionError);
   });
 });
+

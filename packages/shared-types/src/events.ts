@@ -31,3 +31,4 @@ export const OutboxRecordSchema = z.object({
 });
 
 export type OutboxRecord = z.infer<typeof OutboxRecordSchema>;
+

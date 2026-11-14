@@ -4,6 +4,7 @@ export const CurrencyCodeSchema = z.enum([
   'USD',
   'EUR',
   'GBP',
+  'NGN',
   'BTC',
   'ETH',
   'SOL',
@@ -74,3 +75,4 @@ export const JournalEntrySchema = z.object({
 });
 
 export type JournalEntry = z.infer<typeof JournalEntrySchema>;
+

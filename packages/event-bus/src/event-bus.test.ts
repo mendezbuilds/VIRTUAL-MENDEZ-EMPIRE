@@ -163,3 +163,4 @@ describe('@vme/event-bus Reliable Event Sequencing & Replay Engine', () => {
     expect(bus.getConsumerOffset('audit-service', streamId)).toBe(5);
   });
 });
+
