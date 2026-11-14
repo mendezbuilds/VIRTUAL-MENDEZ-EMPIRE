@@ -1,0 +1,20 @@
+{
+  "name": "virtual-mendez-empire",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Virtual Mendez Empire — Autonomous AI-Operated Corporate Operating System",
+  "packageManager": "pnpm@12.11.2",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "echo \"Lint check completed.\"",
+    "clean": "pnpm -r run clean"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}
