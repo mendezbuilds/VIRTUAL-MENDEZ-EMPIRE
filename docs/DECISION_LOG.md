@@ -139,3 +139,35 @@
      - Guard `createAgentRecord()` to ensure `currentConfig.agentId` matches `identity.id`.
      - Enforce that a specialist's supervisor must belong to the specialist's active department or the Executive Office.
 - **Consequences:** Provides bulletproof integrity, auditability, and security across the entire workforce data layer. Validated with 59 tests in `@vme/shared-types` (97 total suite tests). Ready for Milestone 2.2 upon Owner sign-off.
+
+---
+
+## ADR-012: Milestone 2.2 — Department Hierarchy, Native AgentRecord Store, Tiered Leadership Governance, and Emergency Mutation Freeze
+- **Status:** APPROVED & IMPLEMENTED (Milestone 2.2 Directive)
+- **Context:** Milestone 2.1 established the static data contracts in `@vme/shared-types`. Milestone 2.2 activates the organizational runtime in `@vme/department-hierarchy`, providing department topology, workforce traversal, delegation enforcement, leadership governance, and circuit breaker protection.
+- **Decision:**
+  1. **Two-Tier Apex Department Hierarchy:**
+     - `executive_office` serves as the apex governing department (`parentDepartmentId: null`).
+     - All 8 functional departments formally specify `parentDepartmentId: 'executive_office'`.
+     - Department hierarchy is maintained strictly separate from individual agent reporting relationships.
+  2. **Native AgentRecord Storage with Backward-Compatible AgentSpec Wrappers:**
+     - Store the 30 canonical workforce members natively as `AgentRecord` instances in `DepartmentRegistry`.
+     - Provide dynamic `AgentSpec` wrappers (`getAgent()`, `getAllAgents()`, `listAgentsByDepartment()`, `getDepartmentDirector()`) ensuring 100% backward compatibility with Phase 1 downstream consumers.
+  3. **Reporting Graph Traversal (`HierarchyTree`):**
+     - Construct a directed acyclic reporting graph supporting `getSupervisor()`, `getDirectReports()`, `getManagementChain()`, `isSubordinate()`, `findCommonSupervisor()`, and `detectCycles()`.
+     - Strictly enforce that only `EXEC-CEO` reports to the human Owner principal.
+  4. **Corporate Delegation Rule Engine (`DelegationRuleEngine`):**
+     - Executive authority permits downward delegation across any department.
+     - Upward delegation from subordinate to superior is strictly prohibited.
+     - Cross-department task delegation strictly requires Department Director or Executive authority.
+     - Capability execution is gated by `department.allowedCapabilities`.
+  5. **Tiered Leadership Appointment Governance (`DepartmentLeadershipManager`):**
+     - Executive Office appointments (`EXEC-CEO`, `EXEC-COO`) strictly require the human Owner principal (`OWNER_PRINCIPAL_ID`).
+     - Department Director appointments for functional departments can be authorized by the human Owner (`OWNER_PRINCIPAL_ID`) or canonical Executive CEO (`EXEC-CEO`).
+     - Appointments enforce active status and `DIRECTOR` or `EXECUTIVE` seniority, updating department leadership and emitting deep-frozen audit records.
+  6. **Transfer Coordination & Tree Re-linking (`DepartmentTransferCoordinator`):**
+     - Integrates M2.1's `transferAgentDepartment()` with runtime registry state and reporting tree edge updates.
+  7. **Emergency Circuit Breaker Freeze Integration:**
+     - Injects `EmergencySupervisor` (`@vme/security-governance`) into `DepartmentRegistry`.
+     - During Tier 1 or Tier 3 emergency halts, all organizational mutations (`appointDirector`, `transferAgent`) immediately throw `EmergencyHaltError`. Read queries remain operational for post-mortem analysis.
+- **Consequences:** The corporate workforce hierarchy runtime is live, auditable, and resilient. Verified with 21 tests in `@vme/department-hierarchy` (113 total monorepo suite tests passing). Ready for Milestone 2.3 upon Owner directive.

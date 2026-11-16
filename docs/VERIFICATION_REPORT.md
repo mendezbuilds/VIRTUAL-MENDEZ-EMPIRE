@@ -259,8 +259,7 @@ All corrective items specified in the M2.1 Final Corrective Directives have been
 
 ## 7. Scope Boundary Compliance
 
-Milestone 2.1 is strictly bounded to the shared hierarchy, identity, authority, and communication schemas in `@vme/shared-types`. The following subsequent milestones remain completely deferred:
-- Milestone 2.2: Corporate Department Hierarchy & Workforce (`@vme/department-hierarchy`) (Deferred)
+Milestone 2.1 and Milestone 2.2 are complete. The following subsequent milestones remain completely deferred:
 - Milestone 2.3: Persistent episodic & semantic agent memory infrastructure (`@vme/agent-memory`) (Deferred)
 - Milestone 2.4: Agent communication runtime & message routing service (`@vme/agent-communication`) (Deferred)
 - Milestone 2.5: Autonomous task dispatch & execution runtime (`@vme/autonomy-engine`) (Deferred)
@@ -271,14 +270,59 @@ No premature execution, vector memory initialization, message broker deployment,
 
 ---
 
-## 8. Summary & Readiness Assessment
+## 8. Milestone 2.2 Verification & Acceptance
 
-Milestone 2.1 has been completed and verified with all corrective items fully satisfied. All shared contracts, immutable identity registries, mutable configurations, department transfer audit trails, Owner principal definitions, credential safety barriers, authority boundaries, and validation schemas are fully active, strongly typed, and verified in `@vme/shared-types`.
+Milestone 2.2 (`@vme/department-hierarchy`) has been implemented and verified according to Owner authorization:
+
+### 8.1 Monorepo Test Run Evidence
+```
+$ vitest run
+
+ RUN  v2.1.9 C:/Users/USER/Desktop/Virtual Mendez Empire
+
+ ✓ packages/event-bus/src/event-bus.test.ts (2 tests) 10ms
+ ✓ packages/agent-memory/src/memory.test.ts (3 tests) 8ms
+ ✓ packages/ledger-core/src/ledger.test.ts (5 tests) 19ms
+ ✓ packages/security-governance/src/security.test.ts (4 tests) 9ms
+ ✓ packages/idempotency/src/idempotency.test.ts (4 tests) 13ms
+ ✓ services/orchestrator/src/orchestrator.test.ts (2 tests) 8ms
+ ✓ services/gateway/src/gateway.test.ts (2 tests) 147ms
+ ✓ packages/shared-types/src/index.test.ts (59 tests) 86ms
+ ✓ packages/performance-management/src/performance.test.ts (3 tests) 4ms
+ ✓ packages/agent-communication/src/communication.test.ts (4 tests) 8ms
+ ✓ packages/department-hierarchy/src/hierarchy.test.ts (21 tests) 35ms
+ ✓ packages/autonomy-engine/src/e2e-corporate-lifecycle.test.ts (1 test) 10ms
+ ✓ packages/autonomy-engine/src/autonomy.test.ts (3 tests) 10ms
+
+ Test Files  13 passed (13)
+      Tests  113 passed (113)
+   Duration  1.31s
+```
+
+### 8.2 Milestone 2.2 Verification Checklist
+
+| Milestone 2.2 Requirement | Implementation & Verification Summary | Status |
+| :--- | :--- | :-: |
+| **Two-Tier Apex Department Topology** | `executive_office` serves as apex department (`parentDepartmentId: null`). All 8 functional departments link to `executive_office` (`parentDepartmentId: 'executive_office'`). Verified in tests 1.1 and 1.2. | PASS |
+| **Native AgentRecord Storage** | All 30 canonical workforce members stored natively as `AgentRecord` instances in `DepartmentRegistry`, preserving decoupled identity and versioned configuration. Verified in test 2.1. | PASS |
+| **Phase 1 Backward Compatibility** | `getAgent()`, `getAllAgents()`, `listAgentsByDepartment()`, and `getDepartmentDirector()` dynamically map records to `AgentSpec`. Existing downstream packages pass without modification. Verified in test 2.3. | PASS |
+| **Reporting Graph Traversal (`HierarchyTree`)** | Directed acyclic reporting graph supporting `getSupervisor()`, `getDirectReports()`, `getManagementChain()`, `isSubordinate()`, `findCommonSupervisor()`, and `detectCycles()`. Verified in Section 3 (6 tests). | PASS |
+| **Corporate Delegation Rule Engine** | Enforces downward delegation, peer collaboration, cross-department Director gating, capability authorization against `department.allowedCapabilities`, and blocks upward delegation. Verified in Section 4 (2 tests). | PASS |
+| **Tiered Leadership Appointment Governance** | `DepartmentLeadershipManager`: Executive Office appointments (`EXEC-CEO`, `EXEC-COO`) strictly require Owner (`OWNER_PRINCIPAL_ID`); functional department appointments allowed by Owner or CEO; non-executive callers and seniority violations rejected; deep-frozen audit records logged. Verified in Section 5 (2 tests). | PASS |
+| **Department Transfer Coordination** | `DepartmentTransferCoordinator`: executes runtime transfers via M2.1's `transferAgentDepartment()`, updates internal registry state, updates hierarchy tree edges, preserves immutable founding origin, and verifies canonical authorization. Verified in Section 6 (2 tests). | PASS |
+| **Continuous Organizational Auditor** | `OrganizationalAuditor`: wraps `validateOrganizationalRegistry()`, verifies 30 agents, 9 departments, apex topology, and acyclicity. Fails on cardinality or topology corruption. Verified in Section 7 (2 tests). | PASS |
+| **Emergency Circuit Breaker Freeze Integration** | Injects `EmergencySupervisor` from `@vme/security-governance`; freezes all mutations (`transferAgent`, `appointDirector`) during Tier 1/3 emergency halts while preserving read queries. Verified in Section 8 (1 test). | PASS |
+
+---
+
+## 9. Summary & Monorepo Readiness
+
+Milestones 2.1 and 2.2 are complete and verified with all approved architecture items fully satisfied.
 
 The repository is in a clean, passing state:
 - Monorepo compilation: 12 of 12 packages clean compile (`pnpm build`).
-- Monorepo test suites: 13 of 13 test files passed (97/97 tests passing, 0 failures).
-- Base commits `da907351b3ced539d65f5bf750469df1d466bdb8`, `f4acd6ba5ca99a18f9542d633b35bd1a2b8b66c6`, and `3afb386fb30c15368902851c04b6f54f97138412` are preserved in git history.
-- Corrective pass isolated in a dedicated commit.
+- Monorepo test suites: 13 of 13 test files passed (113/113 tests passing, 0 failures).
+- Base commits `da907351b3ced539d65f5bf750469df1d466bdb8`, `f4acd6ba5ca99a18f9542d633b35bd1a2b8b66c6`, `3afb386fb30c15368902851c04b6f54f97138412`, and `8cbfe764db9d341c4070a39bac01a3520c4c0b54` are preserved in git history.
+- Milestone 2.2 isolated in a dedicated commit.
 
-Ready for final Technical Supervisor sign-off and Owner authorization to proceed to Milestone 2.2.
+Ready for Owner and Technical Supervisor review and authorization to proceed to Milestone 2.3.

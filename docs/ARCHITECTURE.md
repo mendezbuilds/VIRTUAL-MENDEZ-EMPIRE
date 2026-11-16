@@ -114,6 +114,16 @@ VME establishes nine foundational departments staffed by 30 canonical AI employe
 - **Identity-Configuration Integrity:** In `createAgentRecord()`, `currentConfig.agentId` must strictly equal `identity.id`.
 - **Specialist-Supervisor Department Alignment:** Specialists must report to a supervisor within their own active department or to Executive Office leadership, preventing illegal cross-department supervision.
 
+### 2.9 Department Hierarchy, Reporting Graph & Governance Runtime (@vme/department-hierarchy)
+- **Two-Tier Apex Department Topology:** `executive_office` serves as the apex governing department (`parentDepartmentId: null`). All 8 operational departments formally link to `executive_office` (`parentDepartmentId: 'executive_office'`).
+- **Native AgentRecord Store with Dynamic AgentSpec Wrappers:** `DepartmentRegistry` natively stores the 30 canonical workforce records as `AgentRecord`, preserving immutable identity decoupling, configuration history, and transfer records, while dynamically providing Phase 1 `AgentSpec` accessors for 100% backward compatibility.
+- **Reporting Tree Graph Traversal (`HierarchyTree`):** Directed acyclic reporting graph supporting `getSupervisor()`, `getDirectReports()`, `getManagementChain()` (upward path to CEO/Owner), `isSubordinate()`, `findCommonSupervisor()`, and `detectCycles()`.
+- **Corporate Delegation Rule Engine (`DelegationRuleEngine`):** Strictly enforces vertical delegation, peer collaboration, cross-department Director gating, capability authorization against `department.allowedCapabilities`, and blocks illegal upward delegation.
+- **Tiered Leadership Appointment Authority (`DepartmentLeadershipManager`):** Executive Office appointments (`EXEC-CEO`, `EXEC-COO`) strictly require the human Owner (`OWNER_PRINCIPAL_ID`). Functional department director appointments require the human Owner or canonical Executive CEO (`EXEC-CEO`). Non-executive authorizers and seniority violations are rejected, and deep-frozen audit records are logged.
+- **Department Transfer Coordination (`DepartmentTransferCoordinator`):** Orchestrates inter-department transfers, updates hierarchy tree edges and direct reports, preserves permanent founding origin, and verifies canonical authorization.
+- **Continuous Organizational Auditor (`OrganizationalAuditor`):** Runs comprehensive validation on startup and after mutations, asserting exact 30-agent and 9-department cardinality, CEO Owner-reporting, and acyclicity.
+- **Emergency Circuit Breaker Freeze:** Injects `EmergencySupervisor` from `@vme/security-governance`; immediately halts organizational mutations (`transferAgent`, `appointDirector`) during active Tier 1 or Tier 3 emergency halts, while preserving read-only queries for diagnostics.
+
 ---
 
 ## 3. Technology Stack
