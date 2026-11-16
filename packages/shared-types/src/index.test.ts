@@ -1154,11 +1154,11 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
   // =========================================================================
   describe('14. M2.1 Final Corrective Pass: Deep Verification of Transfers, Registry, Credentials, and Record Consistency', () => {
     // 1. Authorization Integrity
-    it('14.1 Enforces strict transfer authorization integrity, rejecting spoofed Owner identifiers and forged executive records', () => {
+    it('14.1 Enforces strict transfer authorization integrity, anchoring executive authority to canonical founding executive identities and rejecting forged registries', () => {
       const engineer = findAgentByCode('TECH-FSE')!;
       const roster = cloneFoundingRoster();
 
-      // Spoofed Owner identifiers must be rejected
+      // 1. Spoofed Owner identifiers must be rejected
       const spoofedOwnerIds = ['OWNER', 'owner', 'Stephen Mendez', 'owner_principal', randomUUID()];
       for (const spoofed of spoofedOwnerIds) {
         expect(isAuthorizedTransferAuthority(spoofed, roster)).toBe(false);
@@ -1171,49 +1171,113 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
         ).toThrow('lacks executive or Owner transfer authorization authority');
       }
 
-      // Canonical OWNER_PRINCIPAL_ID strictly succeeds
+      // 2. Legitimate canonical Owner authorization strictly succeeds
       expect(isAuthorizedTransferAuthority(OWNER_PRINCIPAL_ID, roster)).toBe(true);
       expect(isAuthorizedTransferAuthority(CANONICAL_OWNER_PRINCIPAL.principalId, roster)).toBe(true);
 
-      // Forged executive records must be rejected
+      // 3. Legitimate canonical executive authorization strictly succeeds
+      expect(isAuthorizedTransferAuthority('EXEC-CEO', roster)).toBe(true);
+      expect(isAuthorizedTransferAuthority('EXEC-COO', roster)).toBe(true);
+      expect(isAuthorizedTransferAuthority('00000000-0000-0000-0000-000000000001', roster)).toBe(true);
+      expect(isAuthorizedTransferAuthority('00000000-0000-0000-0000-000000000002', roster)).toBe(true);
+
+      // 4. Forged executive records must be rejected (not anchored to canonical founding executive identities)
       expect(isAuthorizedTransferAuthority('EXEC-FORGED', roster)).toBe(false);
       expect(isAuthorizedTransferAuthority(randomUUID(), roster)).toBe(false);
 
-      // Inactive executive (e.g. SUSPENDED) cannot authorize
+      // 5. Inactive executive (e.g. SUSPENDED) cannot authorize
       const suspendedRoster = cloneFoundingRoster();
       const suspendedCeo = suspendedRoster.find((a) => a.agentCode === 'EXEC-CEO')!;
       suspendedCeo.currentConfig.operationalStatus = 'SUSPENDED';
       expect(isAuthorizedTransferAuthority('EXEC-CEO', suspendedRoster)).toBe(false);
 
-      // Non-executive roles (Specialist, Director) cannot authorize
+      // 6. Non-executive roles (Specialist, Director) cannot authorize
       expect(isAuthorizedTransferAuthority('TECH-QA', roster)).toBe(false);
       expect(isAuthorizedTransferAuthority('FIN-CFO', roster)).toBe(false);
 
-      // Active executive (EXEC-CEO, EXEC-COO) succeeds
-      expect(isAuthorizedTransferAuthority('EXEC-CEO', roster)).toBe(true);
-      expect(isAuthorizedTransferAuthority('EXEC-COO', roster)).toBe(true);
+      // 7. Direct calls to isAuthorizedTransferAuthority with a synthetic executive roster must be rejected
+      const syntheticExecId = randomUUID();
+      const syntheticExecutive = createAgentRecord(
+        {
+          id: syntheticExecId,
+          agentCode: 'EXEC-SYNTH',
+          departmentId: 'executive_office',
+          createdAt: new Date().toISOString(),
+        },
+        {
+          ...roster[0]!.currentConfig,
+          configurationId: randomUUID(),
+          agentId: syntheticExecId,
+          level: 'EXECUTIVE',
+          assignedDepartmentId: 'executive_office',
+        }
+      );
+      const syntheticRoster = [syntheticExecutive];
+      expect(isAuthorizedTransferAuthority('EXEC-SYNTH', syntheticRoster)).toBe(false);
+      expect(isAuthorizedTransferAuthority(syntheticExecId, syntheticRoster)).toBe(false);
 
-      // Forged agent roster supplied to transferAgentDepartment is rejected via registry validation
-      const extraId = randomUUID();
-      const forgedRoster = [
-        ...roster,
-        createAgentRecord(
-          { id: extraId, agentCode: 'EXEC-ROGUE', departmentId: 'executive_office', createdAt: new Date().toISOString() },
-          { ...roster[0]!.currentConfig, configurationId: randomUUID(), agentId: extraId }
-        ),
-      ];
+      // 8. Structurally valid 30-agent registry containing a forged executive
+      // Replace EXEC-COO with EXEC-ROGUE in a full 30-agent roster (exactly 30 agents, valid departments)
+      const cooIndex = roster.findIndex((a) => a.agentCode === 'EXEC-COO');
+      const rogueExecId = randomUUID();
+      const rogueExecutive = createAgentRecord(
+        {
+          id: rogueExecId,
+          agentCode: 'EXEC-ROGUE',
+          departmentId: 'executive_office',
+          createdAt: new Date().toISOString(),
+        },
+        {
+          ...roster[cooIndex]!.currentConfig,
+          configurationId: randomUUID(),
+          agentId: rogueExecId,
+          displayName: 'Rogue Chief Operating Officer',
+          jobTitle: 'Forged Chief Operating Officer',
+          level: 'EXECUTIVE',
+          assignedDepartmentId: 'executive_office',
+        }
+      );
+      const structurallyValidForgedRoster = [...roster];
+      structurallyValidForgedRoster[cooIndex] = rogueExecutive;
+
+      // Update subordinates who reported to the replaced COO so the roster is structurally valid
+      const opsDirIndex = structurallyValidForgedRoster.findIndex((a) => a.agentCode === 'OPS-DIR');
+      if (opsDirIndex !== -1) {
+        const opsDir = structurallyValidForgedRoster[opsDirIndex]!;
+        structurallyValidForgedRoster[opsDirIndex] = createAgentRecord(
+          opsDir.identity,
+          {
+            ...opsDir.currentConfig,
+            supervisor: {
+              ...opsDir.supervisor,
+              supervisorAgentId: rogueExecId,
+              supervisorAgentCode: 'EXEC-ROGUE',
+            },
+          },
+          opsDir.configHistory
+        );
+      }
+
+      // Verify the roster has exactly 30 agents and passes structural registry validation
+      expect(structurallyValidForgedRoster).toHaveLength(30);
+      expect(validateOrganizationalRegistry(structurallyValidForgedRoster).valid).toBe(true);
+
+      // A forged executive attempting to authorize a transfer must be REJECTED despite valid 30-agent registry
+      expect(isAuthorizedTransferAuthority('EXEC-ROGUE', structurallyValidForgedRoster)).toBe(false);
+      expect(isAuthorizedTransferAuthority(rogueExecId, structurallyValidForgedRoster)).toBe(false);
+
       expect(() =>
         transferAgentDepartment(engineer, {
           toDepartmentId: 'opportunity_acquisition',
-          reason: 'Forged registry injection',
-          authorizedBy: 'EXEC-CEO',
-          knownAgents: forgedRoster as any,
+          reason: 'Forged executive authorization attempt',
+          authorizedBy: 'EXEC-ROGUE',
+          knownAgents: structurallyValidForgedRoster,
         })
-      ).toThrow('Untrusted agent registry supplied');
+      ).toThrow("Unauthorized department transfer: 'EXEC-ROGUE' lacks executive or Owner transfer authorization authority");
     });
 
     // 2. Strict SemVer Validation
-    it('14.2 Enforces strict SemVer 2.0 validation, rejecting malformed suffixes, negative values, leading zeros, and unsafe numeric values', () => {
+    it('14.2 Enforces Strict Numeric X.Y.Z Versioning (Restricted SemVer 2.0 Subset), rejecting malformed suffixes, negative values, leading zeros, and unsafe numeric values', () => {
       // Positive tests: valid X.Y.Z SemVer strings
       const validVersions = ['0.0.0', '1.0.0', '0.1.0', '0.0.1', '10.20.30', '999.888.777'];
       for (const v of validVersions) {
@@ -1415,6 +1479,33 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
       const mismatchCheck = validateDepartmentTransferHistory(activeMismatchAgent);
       expect(mismatchCheck.valid).toBe(false);
       expect(mismatchCheck.errors.some((e) => e.includes('Active configuration version mismatch'))).toBe(true);
+
+      // 4. Configuration history ordering violation: configHistory entries reordered (non-increasing versions)
+      const reorderedConfigHistory = [
+        transfer2.configHistory[1]!, // 1.1.0 before 1.0.0
+        transfer2.configHistory[0]!, // 1.0.0 after 1.1.0
+      ];
+      const reorderedAgent = createAgentRecord(transfer2.identity, transfer2.currentConfig, reorderedConfigHistory);
+      const reorderedCheck = validateDepartmentTransferHistory(reorderedAgent);
+      expect(reorderedCheck.valid).toBe(false);
+      expect(reorderedCheck.errors.some((e) => e.includes('Configuration history ordering violation'))).toBe(true);
+
+      // 5. Active configuration version does not strictly advance from latest configHistory
+      const nonAdvancingAgent = createAgentRecord(
+        transfer2.identity,
+        {
+          ...transfer2.currentConfig,
+          configVersion: transfer2.configHistory[transfer2.configHistory.length - 1]!.configVersion,
+        },
+        transfer2.configHistory
+      );
+      const nonAdvancingCheck = validateDepartmentTransferHistory(nonAdvancingAgent);
+      expect(nonAdvancingCheck.valid).toBe(false);
+      expect(
+        nonAdvancingCheck.errors.some(
+          (e) => e.includes('Configuration history ordering violation') && e.includes('active config version')
+        )
+      ).toBe(true);
     });
 
     // 5. Transfer Continuity and Frozen Records

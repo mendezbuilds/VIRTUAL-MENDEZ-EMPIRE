@@ -357,14 +357,15 @@ export function updateAgentConfiguration(
 }
 
 /**
-/**
- * Strict SemVer 2.0 regex matching non-negative numeric X.Y.Z with no leading zeros.
+ * Strict Numeric X.Y.Z Versioning (Restricted SemVer 2.0 Subset).
+ * Matches non-negative numeric X.Y.Z with no leading zeros.
+ * Prerelease identifiers (-beta) and build metadata (+build) are intentionally unsupported.
  * Prohibits prefixes, suffixes, whitespace, negative numbers, leading zeros, and malformed segments.
  */
 export const STRICT_SEMVER_REGEX = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 /**
- * Parses and validates a strict SemVer X.Y.Z string.
+ * Parses and validates a Strict Numeric X.Y.Z Versioning (Restricted SemVer 2.0 Subset) string.
  * Rejects malformed suffixes, negative values, leading-zero numeric components where invalid,
  * truncated versions, and values exceeding Number.MAX_SAFE_INTEGER.
  */
@@ -414,8 +415,8 @@ export function compareSemver(v1: string, v2: string): number {
 /**
  * Evaluates whether an authorizer identifier or code possesses authority to approve department transfers.
  * Only the human Owner (strictly OWNER_PRINCIPAL_ID) or active Executive leadership
- * verified against trusted registry records (e.g. EXEC-CEO, EXEC-COO) can authorize transfers.
- * Unconditional 'OWNER' strings, spoofed owner identities, and forged executive records are rejected.
+ * anchored to canonical founding executive identities (EXEC-CEO, EXEC-COO) can authorize transfers.
+ * Caller-supplied rosters cannot establish new executive authority or forge executive identities.
  */
 export function isAuthorizedTransferAuthority(
   authorizerIdOrCode: string,
@@ -429,19 +430,31 @@ export function isAuthorizedTransferAuthority(
     return true;
   }
 
-  // Authorizer must be found in the trusted workforce registry
-  const authorizer = agents.find((a) => a.id === authorizerIdOrCode || a.agentCode === authorizerIdOrCode);
-  if (!authorizer) {
+  // 1. Executive authorization must be anchored to canonical founding executive identities
+  const canonicalExecutive = CANONICAL_FOUNDING_AGENTS.find(
+    (ca) =>
+      (ca.id === authorizerIdOrCode || ca.agentCode === authorizerIdOrCode) &&
+      ca.level === 'EXECUTIVE' &&
+      ca.departmentId === 'executive_office'
+  );
+  if (!canonicalExecutive) {
+    return false; // Not a canonical executive identity; caller-supplied data cannot forge executive authority
+  }
+
+  // 2. Look up the authorizer in the active/supplied registry
+  const authorizerInRegistry = agents.find((a) => a.id === canonicalExecutive.id);
+  if (!authorizerInRegistry) {
     return false;
   }
 
-  // Ensure executive authorization uses trusted registry records with active status, Executive Office department, and permitted authority
+  // 3. Ensure executive identity matches canonical permanent identifiers, with active status and executive role
   if (
-    authorizer.level === 'EXECUTIVE' &&
-    authorizer.operationalStatus === 'ACTIVE' &&
-    authorizer.departmentId === 'executive_office' &&
-    authorizer.id === authorizer.identity?.id &&
-    authorizer.agentCode === authorizer.identity?.agentCode
+    authorizerInRegistry.agentCode === canonicalExecutive.agentCode &&
+    authorizerInRegistry.level === 'EXECUTIVE' &&
+    authorizerInRegistry.operationalStatus === 'ACTIVE' &&
+    authorizerInRegistry.departmentId === 'executive_office' &&
+    authorizerInRegistry.id === authorizerInRegistry.identity?.id &&
+    authorizerInRegistry.agentCode === authorizerInRegistry.identity?.agentCode
   ) {
     return true;
   }
@@ -593,7 +606,54 @@ export function validateDepartmentTransferHistory(
     );
   }
 
-  // Configuration version continuity validation against configHistory and active config
+  // 1. Configuration history chronological and version ordering validation
+  const configHistory = agent.configHistory ?? [];
+  for (let k = 1; k < configHistory.length; k++) {
+    const prevConf = configHistory[k - 1]!;
+    const curConf = configHistory[k]!;
+
+    try {
+      if (compareSemver(curConf.configVersion, prevConf.configVersion) <= 0) {
+        errors.push(
+          `Configuration history ordering violation on ${agent.agentCode}: historical config ${k} version '${curConf.configVersion}' does not strictly advance from previous version '${prevConf.configVersion}'`
+        );
+      }
+    } catch (e: any) {
+      errors.push(`Configuration history record ${k} on ${agent.agentCode} has invalid version string: ${e.message}`);
+    }
+
+    const curConfTime = new Date(curConf.effectiveFrom).getTime();
+    const prevConfTime = new Date(prevConf.effectiveFrom).getTime();
+    if (!isNaN(curConfTime) && !isNaN(prevConfTime) && curConfTime < prevConfTime) {
+      errors.push(
+        `Configuration history timestamp regression on ${agent.agentCode}: historical config ${k} (${curConf.effectiveFrom}) precedes previous config (${prevConf.effectiveFrom})`
+      );
+    }
+  }
+
+  // Active configuration must strictly advance from the latest historical configuration
+  if (configHistory.length > 0) {
+    const lastHist = configHistory[configHistory.length - 1]!;
+    try {
+      if (compareSemver(agent.currentConfig.configVersion, lastHist.configVersion) <= 0) {
+        errors.push(
+          `Configuration history ordering violation on ${agent.agentCode}: active config version '${agent.currentConfig.configVersion}' does not strictly advance from last historical version '${lastHist.configVersion}'`
+        );
+      }
+    } catch (e: any) {
+      errors.push(`Active configuration on ${agent.agentCode} has invalid version string: ${e.message}`);
+    }
+
+    const activeTime = new Date(agent.currentConfig.effectiveFrom).getTime();
+    const lastHistTime = new Date(lastHist.effectiveFrom).getTime();
+    if (!isNaN(activeTime) && !isNaN(lastHistTime) && activeTime < lastHistTime) {
+      errors.push(
+        `Configuration history timestamp regression on ${agent.agentCode}: active config (${agent.currentConfig.effectiveFrom}) precedes last historical config (${lastHist.effectiveFrom})`
+      );
+    }
+  }
+
+  // 2. Configuration version continuity validation against configHistory and active config
   const knownConfigVersions = new Set<string>([
     agent.currentConfig.configVersion,
     ...agent.configHistory.map((c) => c.configVersion),

@@ -114,13 +114,13 @@
 - **Status:** APPROVED (Milestone 2.1 Final Corrective Directive)
 - **Context:** Independent technical review of Milestone 2.1 identified critical targeted enhancements across four areas: department transfer integrity, organizational registry cardinality and supervisor consistency, credential detection depth and schema strictness, and internal record consistency.
 - **Decision:**
-  1. **Department Transfer Integrity & Authorization Continuity:**
+  1. **Department Transfer Integrity, Authorization Anchoring & Version Ordering:**
      - Enforce destination department existence check.
      - Strictly require canonical Owner principal ID (`OWNER_PRINCIPAL_ID`), rejecting informal `'OWNER'` strings or spoofed identities.
-     - Validate executive authorization against trusted registry records, requiring active operational status and Executive Office department assignment. Reject forged executive records.
-     - Enforce strict SemVer 2.0 numeric `X.Y.Z` validation (`STRICT_SEMVER_REGEX`), strictly rejecting malformed suffixes, negative values, leading zeros, and unsafe numeric values.
+     - Anchor executive authorization strictly to canonical founding executive identities (`EXEC-CEO`, `EXEC-COO` in `CANONICAL_FOUNDING_AGENTS`). Caller-supplied rosters cannot establish new executive authority or forge executive identities even if structurally valid.
+     - Enforce **Strict Numeric X.Y.Z Versioning (Restricted SemVer 2.0 Subset)** via `STRICT_SEMVER_REGEX`, strictly rejecting malformed suffixes, negative values, leading zeros, and unsafe numeric values. Prerelease identifiers (`-alpha`, `-beta`) and build metadata (`+build`) are intentionally unsupported.
      - Enforce strictly increasing transfer timestamps ($t_i > t_{i-1}$), rejecting equal timestamps, earlier timestamps, and invalid date strings.
-     - Validate configuration version continuity: reject version gaps, regressions, and active-configuration mismatches.
+     - Validate configuration history ordering and version continuity: reject reordered historical configurations where version or timestamp regresses, require active configuration to strictly advance from latest historical configuration, and reject transfer record version gaps, regressions, and active-configuration mismatches.
      - Validate transfer history continuity: record $i$ `fromDepartmentId` must strictly match record $i-1$ `toDepartmentId`.
      - Enforce final transfer record agreement: active `departmentId` must match the final transfer's target department.
      - Deep-freeze transfer records (`Object.freeze()`) to prevent retrospective tampering.
