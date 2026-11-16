@@ -257,7 +257,9 @@ export function verifyDepartmentSpendingAuthorization(params: {
 export const ReportingRelationshipSchema = z.object({
   agentId: z.string().uuid(),
   agentCode: z.string(),
+  supervisorType: z.enum(['AGENT', 'OWNER_PRINCIPAL']).optional(),
   supervisorAgentId: z.string().uuid().nullable(),
+  ownerPrincipalId: z.string().uuid().optional(),
   reportsToOwner: z.boolean().default(false),
   departmentId: DepartmentIdSchema,
   level: OrganizationalLevelSchema,

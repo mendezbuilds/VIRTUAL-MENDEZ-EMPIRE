@@ -13,7 +13,11 @@ import {
   PermissionProfileSchema,
   MANDATORY_PROHIBITED_FOR_ALL_AGENTS,
   assertNonOwnerProfileValid,
+  OWNER_PRINCIPAL_ID,
+  CANONICAL_OWNER_PRINCIPAL,
+  isOwnerPrincipal,
   type PermissionProfile,
+  type OwnerPrincipal,
 } from './authority.js';
 import type { AgentSpec } from './orchestration.js';
 
@@ -45,10 +49,13 @@ export type AgentOperationalStatus = z.infer<typeof AgentOperationalStatusSchema
 
 /**
  * Agent Supervisor & Reporting Configuration
+ * The CEO reports directly to the human Owner principal outside the 30-agent roster.
  */
 export const AgentSupervisorSchema = z.object({
+  supervisorType: z.enum(['AGENT', 'OWNER_PRINCIPAL']).optional(),
   supervisorAgentId: z.string().uuid().nullable(),
   supervisorAgentCode: z.string().optional(),
+  ownerPrincipalId: z.string().uuid().optional(),
   reportsToOwner: z.boolean().default(false),
   escalationAgentId: z.string().uuid().optional(),
 });
@@ -56,29 +63,140 @@ export const AgentSupervisorSchema = z.object({
 export type AgentSupervisor = z.infer<typeof AgentSupervisorSchema>;
 
 /**
- * Agent Model & Tool Runtime Configuration
+ * Tool Configuration Reference Schema
+ * Models tool capability references and environment/vault secret keys, NEVER raw credentials.
  */
-export const AgentModelConfigSchema = z.object({
-  modelProvider: z.enum(['mock', 'anthropic', 'openai', 'gemini']).default('mock'),
-  modelId: z.string().default('mock-llm-v1'),
-  temperature: z.number().min(0).max(2).default(0.3),
-  systemPrompt: z.string().min(1),
-  allowedTools: z.array(z.string()).default([]),
-  maxParallelTasks: z.number().int().min(1).max(20).default(3),
-  timeoutMs: z.number().int().positive().default(60000),
+export const ToolConfigReferenceSchema = z.object({
+  toolName: z.string().min(1),
+  enabled: z.boolean().default(true),
+  credentialReference: z
+    .string()
+    .regex(/^[A-Z0-9_]{3,64}$|^secret:\/\/.+/, {
+      message: "Tool credential reference must be an environment variable name (e.g. 'GITHUB_TOKEN_REF') or secret URI (e.g. 'secret://...'), never a raw credential",
+    })
+    .optional(),
+  timeoutMs: z.number().int().positive().optional(),
 });
+
+export type ToolConfigReference = z.infer<typeof ToolConfigReferenceSchema>;
+
+export const RAW_CREDENTIAL_PATTERN = /(sk-[a-zA-Z0-9_-]{20,}|sk-ant-[a-zA-Z0-9_-]{20,}|AIza[0-9A-Za-z-_]{35}|Bearer\s+[a-zA-Z0-9._-]{20,}|ghp_[a-zA-Z0-9]{36})/i;
+
+export const DISALLOWED_CREDENTIAL_PROPERTY_NAMES = new Set([
+  'apikey',
+  'api_key',
+  'apitoken',
+  'api_token',
+  'secretkey',
+  'secret_key',
+  'accesstoken',
+  'access_token',
+  'privatekey',
+  'private_key',
+  'password',
+]);
+
+/**
+ * Validates that an arbitrary configuration object contains NO raw credentials, API keys,
+ * bearer tokens, or forbidden credential property names.
+ */
+export function assertNoRawCredentials(data: unknown, path = 'config'): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  function inspect(value: unknown, currentPath: string): void {
+    if (!value) return;
+
+    if (typeof value === 'string') {
+      if (RAW_CREDENTIAL_PATTERN.test(value)) {
+        errors.push(`Raw API key / token detected at '${currentPath}'. Store as environment or vault credential reference instead.`);
+      }
+    } else if (typeof value === 'object') {
+      if (Array.isArray(value)) {
+        value.forEach((item, idx) => inspect(item, `${currentPath}[${idx}]`));
+      } else {
+        for (const [k, v] of Object.entries(value)) {
+          const normalizedKey = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+          if (DISALLOWED_CREDENTIAL_PROPERTY_NAMES.has(normalizedKey)) {
+            errors.push(
+              `Disallowed credential property '${k}' found at '${currentPath}.${k}'. Raw credentials cannot be stored in agent configuration.`
+            );
+          }
+          inspect(v, `${currentPath}.${k}`);
+        }
+      }
+    }
+  }
+
+  inspect(data, path);
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
+}
+
+/**
+ * Agent Model & Tool Runtime Configuration
+ * Models provider, tool references and environment credential names.
+ * Strictly prohibits storage of raw API keys or access tokens.
+ */
+export const AgentModelConfigSchema = z
+  .object({
+    modelProvider: z.enum(['mock', 'anthropic', 'openai', 'gemini']).default('mock'),
+    modelId: z.string().default('mock-llm-v1'),
+    temperature: z.number().min(0).max(2).default(0.3),
+    systemPrompt: z.string().min(1),
+    allowedTools: z.array(z.string()).default([]),
+    toolConfigs: z.array(ToolConfigReferenceSchema).default([]),
+    credentialReference: z
+      .string()
+      .regex(/^[A-Z0-9_]{3,64}$|^secret:\/\/.+/, {
+        message: "Credential reference must be an environment variable name (e.g. 'OPENAI_API_KEY') or secret URI, never a raw secret",
+      })
+      .optional(),
+    maxParallelTasks: z.number().int().min(1).max(20).default(3),
+    timeoutMs: z.number().int().positive().default(60000),
+  })
+  .refine(
+    (cfg) => {
+      const check = assertNoRawCredentials(cfg, 'AgentModelConfig');
+      return check.valid;
+    },
+    {
+      message: 'Raw API keys, access tokens, and bearer credentials are strictly barred from AgentModelConfig. Use credential references instead.',
+    }
+  );
 
 export type AgentModelConfig = z.infer<typeof AgentModelConfigSchema>;
 
 /**
+ * Department Transfer Record Schema
+ * Records the formal transfer of an employee between corporate departments,
+ * preserving their immutable founding department origin while updating active assignment.
+ */
+export const DepartmentTransferRecordSchema = z.object({
+  transferId: z.string().uuid(),
+  fromDepartmentId: DepartmentIdSchema,
+  toDepartmentId: DepartmentIdSchema,
+  effectiveDate: z.string().datetime(),
+  reason: z.string().min(1),
+  authorizedBy: z.string().min(1), // e.g. Owner principal ID or CEO
+  previousConfigVersion: z.string(),
+  newConfigVersion: z.string(),
+});
+
+export type DepartmentTransferRecord = z.infer<typeof DepartmentTransferRecordSchema>;
+
+/**
  * PERMANENT IMMUTABLE AGENT IDENTITY
  * Represents an unchangeable identity anchor that survives title, supervisor,
- * responsibility, and permission reconfigurations.
+ * responsibility, department transfer, and permission reconfigurations.
+ * The founding departmentId / originDepartmentId remains permanently anchored here.
  */
 export const AgentIdentitySchema = z.object({
   id: z.string().uuid(),
   agentCode: AgentCodeSchema,
-  departmentId: DepartmentIdSchema,
+  departmentId: DepartmentIdSchema, // Permanent founding origin department
+  originDepartmentId: DepartmentIdSchema.optional(), // Explicit alias for clarity
   createdAt: z.string().datetime(),
 });
 
@@ -96,12 +214,14 @@ export const AgentConfigurationSchema = z.object({
   jobTitle: z.string().min(1).max(100),
   level: OrganizationalLevelSchema,
   roleDescription: z.string().min(1),
+  assignedDepartmentId: DepartmentIdSchema.optional(), // Current active department assignment
   supervisor: AgentSupervisorSchema,
   assignedResponsibilities: z.array(z.string().min(1)).min(1),
   requiredCapabilities: z.array(z.string().min(1)).min(1),
   permissionProfile: PermissionProfileSchema,
   operationalStatus: AgentOperationalStatusSchema.default('ACTIVE'),
   modelConfig: AgentModelConfigSchema,
+  departmentTransferHistory: z.array(DepartmentTransferRecordSchema).default([]),
   configVersion: z.string().default('1.0.0'),
   effectiveFrom: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -119,11 +239,14 @@ export interface AgentRecord {
   identity: AgentIdentity;
   // Current versioned configuration partition
   currentConfig: AgentConfiguration;
+  // Historical snapshots of superseded configurations
+  configHistory: AgentConfiguration[];
 
   // Flattened convenience accessors (backward compatible with AgentIdentity interface)
   id: string;
   agentCode: string;
-  departmentId: DepartmentId;
+  departmentId: DepartmentId; // Current active assigned department
+  originDepartmentId: DepartmentId; // Permanent founding origin department
   createdAt: string;
   displayName: string;
   jobTitle: string;
@@ -136,6 +259,7 @@ export interface AgentRecord {
   operationalStatus: AgentOperationalStatus;
   modelConfig: AgentModelConfig;
   configVersion: string;
+  departmentTransferHistory: DepartmentTransferRecord[];
 }
 
 /**
@@ -143,7 +267,8 @@ export interface AgentRecord {
  */
 export function createAgentRecord(
   identity: AgentIdentity,
-  currentConfig: AgentConfiguration
+  currentConfig: AgentConfiguration,
+  configHistory: AgentConfiguration[] = []
 ): AgentRecord {
   // Validate that configuration references the correct immutable identity ID
   if (currentConfig.agentId !== identity.id) {
@@ -155,9 +280,11 @@ export function createAgentRecord(
   return {
     identity: { ...identity },
     currentConfig: { ...currentConfig },
+    configHistory: [...configHistory],
     get id() { return this.identity.id; },
     get agentCode() { return this.identity.agentCode; },
-    get departmentId() { return this.identity.departmentId; },
+    get originDepartmentId() { return this.identity.originDepartmentId ?? this.identity.departmentId; },
+    get departmentId() { return this.currentConfig.assignedDepartmentId ?? this.identity.departmentId; },
     get createdAt() { return this.identity.createdAt; },
     get displayName() { return this.currentConfig.displayName; },
     get jobTitle() { return this.currentConfig.jobTitle; },
@@ -170,6 +297,7 @@ export function createAgentRecord(
     get operationalStatus() { return this.currentConfig.operationalStatus; },
     get modelConfig() { return this.currentConfig.modelConfig; },
     get configVersion() { return this.currentConfig.configVersion; },
+    get departmentTransferHistory() { return this.currentConfig.departmentTransferHistory ?? []; },
   };
 }
 
@@ -193,7 +321,68 @@ export function updateAgentConfiguration(
     updatedAt: new Date().toISOString(),
   };
 
-  return createAgentRecord(record.identity, updatedConfig);
+  return createAgentRecord(record.identity, updatedConfig, [...record.configHistory, record.currentConfig]);
+}
+
+/**
+ * Transfers an agent to a new corporate department.
+ * Preserves the permanent immutable founding department origin in identity,
+ * while updating assignedDepartmentId and appending an audit record to departmentTransferHistory.
+ */
+export function transferAgentDepartment(
+  record: AgentRecord,
+  params: {
+    toDepartmentId: DepartmentId;
+    reason: string;
+    authorizedBy: string;
+    effectiveDate?: string;
+    newJobTitle?: string;
+    newSupervisor?: AgentSupervisor;
+    newVersion?: string;
+  }
+): AgentRecord {
+  const fromDepartmentId = record.departmentId;
+  if (fromDepartmentId === params.toDepartmentId) {
+    throw new Error(`Cannot transfer agent ${record.agentCode} to same department '${fromDepartmentId}'`);
+  }
+
+  const nextVersion = params.newVersion ?? incrementMinorVersion(record.currentConfig.configVersion);
+  const transferRecord: DepartmentTransferRecord = {
+    transferId: randomUUID(),
+    fromDepartmentId,
+    toDepartmentId: params.toDepartmentId,
+    effectiveDate: params.effectiveDate ?? new Date().toISOString(),
+    reason: params.reason,
+    authorizedBy: params.authorizedBy,
+    previousConfigVersion: record.currentConfig.configVersion,
+    newConfigVersion: nextVersion,
+  };
+
+  const updatedConfig: AgentConfiguration = {
+    ...record.currentConfig,
+    jobTitle: params.newJobTitle ?? record.currentConfig.jobTitle,
+    supervisor: params.newSupervisor ?? record.currentConfig.supervisor,
+    assignedDepartmentId: params.toDepartmentId,
+    departmentTransferHistory: [
+      ...(record.currentConfig.departmentTransferHistory ?? []),
+      transferRecord,
+    ],
+    configurationId: randomUUID(),
+    agentId: record.identity.id,
+    configVersion: nextVersion,
+    effectiveFrom: transferRecord.effectiveDate,
+    updatedAt: new Date().toISOString(),
+  };
+
+  return createAgentRecord(record.identity, updatedConfig, [...record.configHistory, record.currentConfig]);
+}
+
+function incrementMinorVersion(version: string): string {
+  const parts = version.split('.').map((p) => parseInt(p, 10));
+  if (parts.length === 3 && parts[0] !== undefined && parts[1] !== undefined && !parts.some(isNaN)) {
+    return `${parts[0]}.${parts[1] + 1}.0`;
+  }
+  return `${version}.1`;
 }
 
 function incrementPatchVersion(version: string): string {
@@ -308,15 +497,17 @@ function createFoundingAgent(
       temperature: level === 'DIRECTOR' || level === 'EXECUTIVE' ? 0.2 : 0.3,
       systemPrompt,
       allowedTools,
+      toolConfigs: [],
       maxParallelTasks,
       timeoutMs: 60000,
     },
+    departmentTransferHistory: [],
     configVersion: '1.0.0',
     effectiveFrom: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
   };
 
-  return createAgentRecord(identity, currentConfig);
+  return createAgentRecord(identity, currentConfig, []);
 }
 
 /**
@@ -337,7 +528,10 @@ export const CANONICAL_FOUNDING_AGENTS: AgentRecord[] = [
     'EXECUTIVE',
     'Translates Owner directives into corporate strategy, coordinates all 9 departments, and compiles executive board reports. Subordinate to Owner authority.',
     {
+      supervisorType: 'OWNER_PRINCIPAL',
       supervisorAgentId: null,
+      supervisorAgentCode: undefined,
+      ownerPrincipalId: OWNER_PRINCIPAL_ID,
       reportsToOwner: true,
     },
     [
@@ -1535,7 +1729,7 @@ export function getDepartmentDirector(deptId: DepartmentId): AgentRecord | undef
  * Validates:
  * 1. Exactly 30 agents across 9 departments
  * 2. Uniqueness of all UUIDs and Agent Codes
- * 3. Invalid department references
+ * 3. Invalid department references (both origin and assigned)
  * 4. Missing directors: Every department has an active Director or Executive assigned
  * 5. Missing supervisors: Non-CEO agents must have a valid supervisor
  * 6. Non-existent supervisor references
@@ -1543,7 +1737,10 @@ export function getDepartmentDirector(deptId: DepartmentId): AgentRecord | undef
  * 8. Circular reporting chains: Acyclic hierarchy guarantee
  * 9. Seniority violations: Supervisors must be senior or equal
  * 10. Prohibited Owner-level permission assignments
- * 11. CEO reporting: CEO must report directly to Owner (reportsToOwner: true, supervisorAgentId: null)
+ * 11. CEO reporting to Owner principal: Only Executive CEO may report to Owner principal
+ * 12. Owner principal boundary: The human Owner principal is distinct and excluded from workforce roster
+ * 13. Credential safety: Agent and tool configurations contain zero raw API keys or secrets
+ * 14. Department transfer history integrity
  */
 export function validateOrganizationalRegistry(
   agents: AgentRecord[] = CANONICAL_FOUNDING_AGENTS,
@@ -1553,6 +1750,16 @@ export function validateOrganizationalRegistry(
   const idMap = new Map<string, AgentRecord>();
   const codeMap = new Map<string, AgentRecord>();
   const validDeptIds = new Set(departments.map((d) => d.id));
+
+  // 0. Owner Principal Boundary Check
+  // The human Owner principal is a distinct authority principal outside the AI workforce registry
+  for (const agent of agents) {
+    if (agent.id === OWNER_PRINCIPAL_ID) {
+      errors.push(
+        `Owner principal '${OWNER_PRINCIPAL_ID}' cannot be included in the AI workforce registry. The Owner is a distinct human authority principal.`
+      );
+    }
+  }
 
   // 1. Uniqueness of IDs and Codes & Department Validity
   for (const agent of agents) {
@@ -1569,7 +1776,7 @@ export function validateOrganizationalRegistry(
     }
 
     // Invalid department reference
-    if (!validDeptIds.has(agent.departmentId)) {
+    if (!validDeptIds.has(agent.departmentId) || !validDeptIds.has(agent.originDepartmentId)) {
       errors.push(`Agent ${agent.agentCode} references invalid department: '${agent.departmentId}'`);
     }
 
@@ -1577,6 +1784,24 @@ export function validateOrganizationalRegistry(
     const profileCheck = assertNonOwnerProfileValid(agent.permissionProfile);
     if (!profileCheck.valid) {
       errors.push(`Agent ${agent.agentCode} has invalid permission profile: ${profileCheck.errors.join('; ')}`);
+    }
+
+    // Model configuration & tool configuration credential safety check
+    const credentialCheck = assertNoRawCredentials(agent.currentConfig, agent.agentCode);
+    if (!credentialCheck.valid) {
+      errors.push(
+        `Agent ${agent.agentCode} configuration contains raw credentials: ${credentialCheck.errors.join('; ')}`
+      );
+    }
+
+    // Department transfer history validation
+    for (const transfer of agent.departmentTransferHistory) {
+      if (!validDeptIds.has(transfer.fromDepartmentId)) {
+        errors.push(`Agent ${agent.agentCode} has transfer record with invalid fromDepartmentId: '${transfer.fromDepartmentId}'`);
+      }
+      if (!validDeptIds.has(transfer.toDepartmentId)) {
+        errors.push(`Agent ${agent.agentCode} has transfer record with invalid toDepartmentId: '${transfer.toDepartmentId}'`);
+      }
     }
   }
 
@@ -1592,10 +1817,20 @@ export function validateOrganizationalRegistry(
 
   // 3. Supervisor Resolution, Seniority & Self-Reporting Check
   for (const agent of agents) {
-    // CEO reporting check
-    if (agent.supervisor.reportsToOwner) {
+    // Owner principal reporting check
+    if (agent.supervisor.reportsToOwner || agent.supervisor.supervisorType === 'OWNER_PRINCIPAL') {
+      if (agent.level !== 'EXECUTIVE') {
+        errors.push(
+          `Non-executive agent ${agent.agentCode} (${agent.level}) cannot report directly to the Owner principal. Only executive leadership may report to Owner.`
+        );
+      }
       if (agent.supervisor.supervisorAgentId !== null) {
         errors.push(`Agent ${agent.agentCode} reports to Owner; supervisorAgentId must be null`);
+      }
+      if (agent.supervisor.ownerPrincipalId && agent.supervisor.ownerPrincipalId !== OWNER_PRINCIPAL_ID) {
+        errors.push(
+          `Agent ${agent.agentCode} references invalid ownerPrincipalId '${agent.supervisor.ownerPrincipalId}' (expected ${OWNER_PRINCIPAL_ID})`
+        );
       }
       continue;
     }

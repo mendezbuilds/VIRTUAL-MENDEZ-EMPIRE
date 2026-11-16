@@ -14,6 +14,67 @@ export const AuthorityScopeSchema = z.enum([
 export type AuthorityScope = z.infer<typeof AuthorityScopeSchema>;
 
 /**
+ * Canonical Owner Principal ID
+ * Unique identifier for the human Owner authority principal outside the 30-agent AI workforce registry.
+ */
+export const OWNER_PRINCIPAL_ID = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * Owner Principal Schema
+ * Represents the human Owner (Stephen Mendez) as a distinct authority principal
+ * outside the 30-agent corporate workforce registry.
+ */
+export const OwnerPrincipalSchema = z.object({
+  principalId: z.string().uuid(),
+  principalType: z.literal('HUMAN_OWNER'),
+  name: z.string().min(1),
+  title: z.string().min(1),
+  authorityScope: z.literal('OWNER_ONLY'),
+  email: z.string().email(),
+  isActive: z.boolean().default(true),
+  authorizedCapabilities: z.array(z.string().min(1)),
+  registeredAt: z.string().datetime(),
+});
+
+export type OwnerPrincipal = z.infer<typeof OwnerPrincipalSchema>;
+
+/**
+ * Canonical Owner Principal Record
+ */
+export const CANONICAL_OWNER_PRINCIPAL: OwnerPrincipal = {
+  principalId: OWNER_PRINCIPAL_ID,
+  principalType: 'HUMAN_OWNER',
+  name: 'Stephen Mendez',
+  title: 'Owner & Founder',
+  authorityScope: 'OWNER_ONLY',
+  email: 'stephen@virtualmendezempire.internal',
+  isActive: true,
+  authorizedCapabilities: [
+    'strategic_directives',
+    'capital_allocation_approval',
+    'consequential_action_authorization',
+    'governance_overrides',
+    'emergency_shutdown_and_recovery',
+    'workforce_supervision',
+  ],
+  registeredAt: '2026-01-01T00:00:00.000Z',
+};
+
+/**
+ * Helper to test if a given principal ID belongs to the human Owner.
+ */
+export function isOwnerPrincipal(principalId: string): boolean {
+  return principalId === OWNER_PRINCIPAL_ID;
+}
+
+/**
+ * Returns the canonical Owner principal record.
+ */
+export function getOwnerPrincipal(): OwnerPrincipal {
+  return CANONICAL_OWNER_PRINCIPAL;
+}
+
+/**
  * Consequential and Restricted Action Classification.
  * Any action classified here CANNOT execute autonomously without explicit Owner authorization.
  * Executive or CEO status NEVER grants permission to execute or autonomously authorize these actions.

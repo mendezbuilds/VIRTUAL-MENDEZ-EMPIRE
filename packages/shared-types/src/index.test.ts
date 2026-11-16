@@ -14,6 +14,11 @@ import {
   AgentConfigurationSchema,
   createAgentRecord,
   updateAgentConfiguration,
+  transferAgentDepartment,
+  DepartmentTransferRecordSchema,
+  ToolConfigReferenceSchema,
+  assertNoRawCredentials,
+  AgentModelConfigSchema,
   CANONICAL_FOUNDING_AGENTS,
   findAgentById,
   findAgentByCode,
@@ -26,6 +31,10 @@ import {
   AuthorityScopeSchema,
   RestrictedActionTypeSchema,
   PermissionProfileSchema,
+  OWNER_PRINCIPAL_ID,
+  OwnerPrincipalSchema,
+  CANONICAL_OWNER_PRINCIPAL,
+  isOwnerPrincipal,
   CANONICAL_APPROVAL_REQUIREMENTS,
   MANDATORY_PROHIBITED_FOR_ALL_AGENTS,
   assertNonOwnerProfileValid,
@@ -286,10 +295,12 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
       expect(validation.valid).toBe(true);
     });
 
-    it('verifies the CEO reports to Owner with null supervisorAgentId', () => {
+    it('verifies the CEO reports to Owner principal with null supervisorAgentId', () => {
       const ceo = findAgentByCode('EXEC-CEO')!;
       expect(ceo).toBeDefined();
       expect(ceo.supervisor.reportsToOwner).toBe(true);
+      expect(ceo.supervisor.supervisorType).toBe('OWNER_PRINCIPAL');
+      expect(ceo.supervisor.ownerPrincipalId).toBe(OWNER_PRINCIPAL_ID);
       expect(ceo.supervisor.supervisorAgentId).toBeNull();
       expect(ceo.level).toBe('EXECUTIVE');
     });
@@ -979,6 +990,154 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
         timestamp: new Date().toISOString(),
       };
       expect(EscalationEventSchema.safeParse(escalationEvent).success).toBe(true);
+    });
+  });
+
+  // =========================================================================
+  // 13. Final Refinements: Department Origin Immutability, Owner Principal & Credential Safety
+  // =========================================================================
+  describe('13. Final Refinements: Department Origin Immutability, Owner Principal & Credential Safety', () => {
+    // Refinement 1
+    it('preserves immutable founding department origin and records department transfers in versioned history', () => {
+      const engineer = findAgentByCode('TECH-FSE')!;
+      expect(engineer.originDepartmentId).toBe('technology_engineering');
+      expect(engineer.departmentId).toBe('technology_engineering');
+      expect(engineer.departmentTransferHistory).toHaveLength(0);
+
+      // Execute department transfer
+      const transferred = transferAgentDepartment(engineer, {
+        toDepartmentId: 'opportunity_acquisition',
+        reason: 'Temporary rotation as Technical Opportunity Scout',
+        authorizedBy: 'EXEC-CEO',
+        newJobTitle: 'Technical Opportunity Scout',
+      });
+
+      // 1. Permanent origin department must remain UNCHANGED
+      expect(transferred.originDepartmentId).toBe('technology_engineering');
+      expect(transferred.identity.departmentId).toBe('technology_engineering');
+      expect(transferred.identity.id).toBe(engineer.identity.id);
+      expect(transferred.identity.agentCode).toBe(engineer.identity.agentCode);
+
+      // 2. Active department and job title must reflect transfer
+      expect(transferred.departmentId).toBe('opportunity_acquisition');
+      expect(transferred.jobTitle).toBe('Technical Opportunity Scout');
+      expect(transferred.configVersion).toBe('1.1.0');
+
+      // 3. Department transfer history must record audit trail
+      expect(transferred.departmentTransferHistory).toHaveLength(1);
+      const transferAudit = transferred.departmentTransferHistory[0]!;
+      expect(transferAudit.fromDepartmentId).toBe('technology_engineering');
+      expect(transferAudit.toDepartmentId).toBe('opportunity_acquisition');
+      expect(transferAudit.reason).toContain('Technical Opportunity Scout');
+      expect(transferAudit.authorizedBy).toBe('EXEC-CEO');
+      expect(transferAudit.previousConfigVersion).toBe('1.0.0');
+      expect(transferAudit.newConfigVersion).toBe('1.1.0');
+
+      // 4. Configuration history preserves previous state
+      expect(transferred.configHistory).toHaveLength(1);
+      expect(transferred.configHistory[0]!.jobTitle).toBe(engineer.jobTitle);
+
+      // 5. Attempting to transfer to same department throws error
+      expect(() =>
+        transferAgentDepartment(transferred, {
+          toDepartmentId: 'opportunity_acquisition',
+          reason: 'Redundant transfer',
+          authorizedBy: 'EXEC-CEO',
+        })
+      ).toThrow("Cannot transfer agent TECH-FSE to same department 'opportunity_acquisition'");
+    });
+
+    // Refinement 2
+    it('represents the Owner as a distinct authority principal outside the 30-agent workforce registry', () => {
+      // 1. Verify Owner principal schema and canonical record
+      expect(OwnerPrincipalSchema.safeParse(CANONICAL_OWNER_PRINCIPAL).success).toBe(true);
+      expect(CANONICAL_OWNER_PRINCIPAL.principalId).toBe(OWNER_PRINCIPAL_ID);
+      expect(CANONICAL_OWNER_PRINCIPAL.principalType).toBe('HUMAN_OWNER');
+      expect(CANONICAL_OWNER_PRINCIPAL.name).toBe('Stephen Mendez');
+      expect(CANONICAL_OWNER_PRINCIPAL.authorityScope).toBe('OWNER_ONLY');
+      expect(isOwnerPrincipal(OWNER_PRINCIPAL_ID)).toBe(true);
+      expect(isOwnerPrincipal(randomUUID())).toBe(false);
+
+      // 2. Verify Owner principal is NOT part of the 30-agent workforce roster
+      expect(CANONICAL_FOUNDING_AGENTS.some((a) => a.id === OWNER_PRINCIPAL_ID)).toBe(false);
+
+      // 3. Verify CEO reports to the Owner principal
+      const ceo = findAgentByCode('EXEC-CEO')!;
+      expect(ceo.supervisor.supervisorType).toBe('OWNER_PRINCIPAL');
+      expect(ceo.supervisor.ownerPrincipalId).toBe(OWNER_PRINCIPAL_ID);
+      expect(ceo.supervisor.supervisorAgentId).toBeNull();
+      expect(ceo.supervisor.reportsToOwner).toBe(true);
+
+      // 4. Anomaly test: Reject workforce registry if Owner principal is mistakenly added as an agent
+      const corruptedRosterWithOwner = cloneFoundingRoster();
+      corruptedRosterWithOwner[0]!.identity.id = OWNER_PRINCIPAL_ID;
+      corruptedRosterWithOwner[0]!.currentConfig.agentId = OWNER_PRINCIPAL_ID;
+      const ownerInRosterCheck = validateOrganizationalRegistry(corruptedRosterWithOwner);
+      expect(ownerInRosterCheck.valid).toBe(false);
+      expect(ownerInRosterCheck.errors.some((e) => e.includes('Owner principal'))).toBe(true);
+
+      // 5. Anomaly test: Reject non-executive agent attempting to report directly to Owner principal
+      const corruptedRosterWithIllegalReport = cloneFoundingRoster();
+      const engineer = corruptedRosterWithIllegalReport.find((a) => a.agentCode === 'TECH-FSE')!;
+      engineer.currentConfig.supervisor.supervisorType = 'OWNER_PRINCIPAL';
+      engineer.currentConfig.supervisor.ownerPrincipalId = OWNER_PRINCIPAL_ID;
+      engineer.currentConfig.supervisor.supervisorAgentId = null;
+      engineer.currentConfig.supervisor.reportsToOwner = true;
+      const illegalReportCheck = validateOrganizationalRegistry(corruptedRosterWithIllegalReport);
+      expect(illegalReportCheck.valid).toBe(false);
+      expect(illegalReportCheck.errors.some((e) => e.includes('cannot report directly to the Owner principal'))).toBe(true);
+    });
+
+    // Refinement 3
+    it('models configuration references for LLM providers and tools, but strictly bars raw credentials', () => {
+      // 1. All 30 canonical founding agents must contain zero raw credentials
+      for (const agent of CANONICAL_FOUNDING_AGENTS) {
+        const check = assertNoRawCredentials(agent.currentConfig, agent.agentCode);
+        expect(check.valid, `Agent ${agent.agentCode} contains credentials: ${check.errors.join(', ')}`).toBe(true);
+      }
+
+      // 2. Valid model and tool credential references succeed
+      const validConfig = {
+        modelProvider: 'openai' as const,
+        modelId: 'gpt-4o',
+        temperature: 0.2,
+        systemPrompt: 'You are an autonomous corporate research specialist.',
+        allowedTools: ['web_search', 'code_interpreter'],
+        toolConfigs: [
+          {
+            toolName: 'web_search',
+            enabled: true,
+            credentialReference: 'TAVILY_API_KEY_REF',
+          },
+        ],
+        credentialReference: 'OPENAI_API_KEY_SECRET',
+        maxParallelTasks: 3,
+        timeoutMs: 60000,
+      };
+      expect(AgentModelConfigSchema.safeParse(validConfig).success).toBe(true);
+
+      // 3. Raw OpenAI API key in credentialReference is rejected
+      const rawKeyConfig = {
+        ...validConfig,
+        credentialReference: 'sk-proj-abc1234567890abcdef1234567890abcdef12',
+      };
+      expect(AgentModelConfigSchema.safeParse(rawKeyConfig).success).toBe(false);
+
+      // 4. Raw Anthropic API key in systemPrompt is rejected
+      const rawPromptConfig = {
+        ...validConfig,
+        systemPrompt: 'Use Anthropic key sk-ant-api03-abcdef1234567890abcdef1234567890 for queries',
+      };
+      expect(AgentModelConfigSchema.safeParse(rawPromptConfig).success).toBe(false);
+
+      // 5. Disallowed credential field name ('apiKey') in configuration is caught by assertNoRawCredentials
+      const configWithRawField = {
+        ...validConfig,
+        apiKey: 'secret_value_123',
+      };
+      const checkField = assertNoRawCredentials(configWithRawField);
+      expect(checkField.valid).toBe(false);
+      expect(checkField.errors.some((e) => e.includes("Disallowed credential property 'apiKey'"))).toBe(true);
     });
   });
 });

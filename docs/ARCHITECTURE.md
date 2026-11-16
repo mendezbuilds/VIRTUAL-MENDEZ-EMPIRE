@@ -85,6 +85,18 @@ VME establishes nine foundational departments staffed by 30 canonical AI employe
 - **Trusted Sender Derivation:** Communication envelopes derive sender identity (`senderAgentId`, `senderDepartmentId`, `senderAgentCode`, and signature) strictly from the verified backend `ExecutionContext`. Sender IDs supplied in arbitrary message payloads are rejected.
 - **Type-Specific Payload Schemas:** All 14 canonical message categories are validated against dedicated Zod payload schemas before entry into the message routing subsystem.
 
+### 2.5 Department Transfers & Permanent Origin Immutability
+- **Permanent Department Origin:** An employee's founding department origin (`identity.departmentId` / `identity.originDepartmentId`) is immutable and never rewritten.
+- **Versioned Department Assignment:** Department reassignments are tracked via `currentConfig.assignedDepartmentId` and formal `DepartmentTransferRecord` entries in `departmentTransferHistory`, documenting transfer ID, origin department, target department, authorization authority, timestamp, and configuration version increments.
+
+### 2.6 Human Owner Principal Outside AI Workforce Registry
+- **Distinct Authority Principal:** The human Owner (Stephen Mendez) is represented as `CANONICAL_OWNER_PRINCIPAL` with reserved ID `00000000-0000-0000-0000-000000000000` (`OWNER_PRINCIPAL_ID`), completely outside the 30-agent AI workforce registry.
+- **CEO Reporting Line:** The Executive CEO reports directly to the Owner principal (`supervisorType: 'OWNER_PRINCIPAL'`, `ownerPrincipalId: OWNER_PRINCIPAL_ID`, `supervisorAgentId: null`). Non-executive agents are prohibited from reporting directly to the Owner.
+
+### 2.7 Model & Tool Configuration Credential Safety
+- **Secret Reference Architecture:** Model and tool configurations reference environment variable names (e.g. `OPENAI_API_KEY`) or vault URIs (`secret://...`) via `credentialReference`, NEVER raw API keys or tokens.
+- **Runtime Credential Scan:** `assertNoRawCredentials()` and schema refinements reject raw keys (`sk-...`, `Bearer ...`, `ghp_...`) and disallowed credential property names (`apiKey`, `password`, `secretKey`, `accessToken`).
+
 ---
 
 ## 3. Technology Stack
