@@ -87,15 +87,35 @@ VME establishes nine foundational departments staffed by 30 canonical AI employe
 
 ### 2.5 Department Transfers & Permanent Origin Immutability
 - **Permanent Department Origin:** An employee's founding department origin (`identity.departmentId` / `identity.originDepartmentId`) is immutable and never rewritten.
-- **Versioned Department Assignment:** Department reassignments are tracked via `currentConfig.assignedDepartmentId` and formal `DepartmentTransferRecord` entries in `departmentTransferHistory`, documenting transfer ID, origin department, target department, authorization authority, timestamp, and configuration version increments.
+- **Versioned Department Assignment:** Department reassignments are executed via `transferAgentDepartment()`, setting `currentConfig.assignedDepartmentId` and appending a deeply frozen audit record to `departmentTransferHistory`.
+- **Transfer Authorization:** Department transfers require verified authorization from either the human Owner (`OWNER_PRINCIPAL_ID`) or active Executive leadership (`EXEC-CEO`, `EXEC-COO`).
+- **Transfer Continuity & SemVer Monotonicity:** Each transfer enforces:
+  1. Destination department exists and differs from current department.
+  2. Monotonically increasing SemVer configuration versions (`newConfigVersion > previousConfigVersion`).
+  3. Continuous transfer chaining (`fromDepartmentId` of record $i$ strictly equals `toDepartmentId` of record $i-1$).
+  4. Monotonically advancing effective timestamps.
+  5. Active department strictly matches the final transfer record's `toDepartmentId`.
+  6. Audit records are deep-frozen to prevent retrospective modification.
 
-### 2.6 Human Owner Principal Outside AI Workforce Registry
+### 2.6 Human Owner Principal & Organizational Registry Cardinality
 - **Distinct Authority Principal:** The human Owner (Stephen Mendez) is represented as `CANONICAL_OWNER_PRINCIPAL` with reserved ID `00000000-0000-0000-0000-000000000000` (`OWNER_PRINCIPAL_ID`), completely outside the 30-agent AI workforce registry.
-- **CEO Reporting Line:** The Executive CEO reports directly to the Owner principal (`supervisorType: 'OWNER_PRINCIPAL'`, `ownerPrincipalId: OWNER_PRINCIPAL_ID`, `supervisorAgentId: null`). Non-executive agents are prohibited from reporting directly to the Owner.
+- **Strict Cardinality Enforcement:** `validateOrganizationalRegistry()` explicitly enforces:
+  1. Exactly 30 AI workforce agent records (`agents.length === 30`).
+  2. Exactly 9 canonical departments (`departments.length === 9`).
+  3. Complete separation of the human Owner from the AI workforce roster (rejecting Owner principal injection).
+- **CEO-Only Direct Owner Reporting:** Only the canonical Executive CEO (`EXEC-CEO`) is permitted to report directly to the Owner principal (`supervisorType: 'OWNER_PRINCIPAL'`, `ownerPrincipalId: OWNER_PRINCIPAL_ID`, `supervisorAgentId: null`). All non-CEO agents attempting to report to the Owner are rejected.
+- **Supervisor Field Consistency:** Enforces strict internal consistency between `reportsToOwner`, `supervisorType`, `ownerPrincipalId`, and `supervisorAgentId`.
 
-### 2.7 Model & Tool Configuration Credential Safety
+### 2.7 Model & Tool Configuration Credential Safety & Strict Schemas
 - **Secret Reference Architecture:** Model and tool configurations reference environment variable names (e.g. `OPENAI_API_KEY`) or vault URIs (`secret://...`) via `credentialReference`, NEVER raw API keys or tokens.
-- **Runtime Credential Scan:** `assertNoRawCredentials()` and schema refinements reject raw keys (`sk-...`, `Bearer ...`, `ghp_...`) and disallowed credential property names (`apiKey`, `password`, `secretKey`, `accessToken`).
+- **Expanded Sensitive Property Detection:** `assertNoRawCredentials()` detects and rejects properties including `apiKey`, `password`, `secretKey`, `accessToken`, `secret`, `token`, `clientSecret`, `client_secret`, `refreshToken`, `refresh_token`, `authorization`, `auth`, `passphrase`, and `privateKey`.
+- **Strict Schema Enforcement:** All identity, configuration, supervisor, model, tool, and transfer schemas utilize `.strict()` to reject unrecognized or injected properties.
+- **Cycle-Safe Recursive Inspection:** Recursive credential scanning utilizes a `WeakSet` tracking visited object references, eliminating recursion overflows and hanging on circular references.
+- **Credential Resolution Boundary:** Credential schemas define references only. Runtime credential resolution is strictly isolated to controlled runtime contexts governed by `CredentialResolverContextSchema`.
+
+### 2.8 Agent Record Consistency & Supervisor Department Alignment
+- **Identity-Configuration Integrity:** In `createAgentRecord()`, `currentConfig.agentId` must strictly equal `identity.id`.
+- **Specialist-Supervisor Department Alignment:** Specialists must report to a supervisor within their own active department or to Executive Office leadership, preventing illegal cross-department supervision.
 
 ---
 

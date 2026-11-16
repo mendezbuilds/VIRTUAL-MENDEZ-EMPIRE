@@ -107,3 +107,32 @@
   9. **Model & Tool Credential Safety:** Model configurations reference environment variable names or secret vault URIs via `credentialReference`, strictly prohibiting raw API keys, bearer tokens, or sensitive credential property names in agent configurations.
   10. **Phase 1 Contract Preservation:** Maintain 100% backward compatibility with Phase 1 types and downstream services, verified via automated regression testing.
 - **Consequences:** Canonical type definitions and runtime validation schemas in `@vme/shared-types` serve as the immutable single source of truth for all subsequent Phase 2 milestones.
+
+---
+
+## ADR-011: Milestone 2.1 Final Corrective Enhancements: Department Transfer Continuity, Exact Registry Cardinality, Strict Schema Credential Defense, and Record Consistency
+- **Status:** APPROVED (Milestone 2.1 Final Corrective Directive)
+- **Context:** Independent technical review of Milestone 2.1 identified critical targeted enhancements across four areas: department transfer integrity, organizational registry cardinality and supervisor consistency, credential detection depth and schema strictness, and internal record consistency.
+- **Decision:**
+  1. **Department Transfer Integrity & Continuity:**
+     - Enforce destination department existence check.
+     - Validate transfer authorization authority (`isAuthorizedTransferAuthority()`), allowing only the Owner (`OWNER_PRINCIPAL_ID`) or active Executive leadership (`EXEC-CEO`, `EXEC-COO`).
+     - Enforce monotonically increasing SemVer version transitions (`compareSemver()`).
+     - Validate transfer history continuity: record $i$ `fromDepartmentId` must strictly match record $i-1$ `toDepartmentId`, and versions must not regress.
+     - Enforce final transfer record agreement: an agent's active `departmentId` must match the final transfer's target department.
+     - Deep-freeze transfer records (`Object.freeze()`) to prevent retrospective tampering.
+     - Permanently anchor founding department identity (`originDepartmentId`).
+  2. **Workforce Cardinality & Strict CEO-Only Owner Reporting:**
+     - Explicitly enforce exactly 30 AI workforce agents and exactly 9 canonical departments in `validateOrganizationalRegistry()`.
+     - Strictly restrict direct Owner reporting to `EXEC-CEO`. All other agents (including `EXEC-COO`) are prohibited from reporting directly to the Owner principal.
+     - Enforce field consistency across `reportsToOwner`, `supervisorType`, `ownerPrincipalId`, and `supervisorAgentId`.
+     - Reject any unauthorized injection of the Owner principal into the AI workforce registry.
+  3. **Credential Defense-in-Depth & Strict Schema Validation:**
+     - Expand disallowed property detection in `assertNoRawCredentials()` to include `secret`, `token`, `clientSecret`, `client_secret`, `refreshToken`, `refresh_token`, `authorization`, `auth`, `passphrase`, `privateKey`, and `password`.
+     - Apply `.strict()` to all core schemas (`AgentSupervisorSchema`, `ToolConfigReferenceSchema`, `AgentModelConfigSchema`, `DepartmentTransferRecordSchema`, `AgentIdentitySchema`, `AgentConfigurationSchema`) to reject unexpected injected keys.
+     - Implement cycle-safe recursive credential scanning using a `WeakSet` of visited references.
+     - Formalize runtime credential resolution boundary via `CredentialResolverContextSchema`.
+  4. **Agent Record Internal Consistency & Specialist Supervisor Alignment:**
+     - Guard `createAgentRecord()` to ensure `currentConfig.agentId` matches `identity.id`.
+     - Enforce that a specialist's supervisor must belong to the specialist's active department or the Executive Office.
+- **Consequences:** Provides bulletproof integrity, auditability, and security across the entire workforce data layer. Validated with 55 tests in `@vme/shared-types` (93 total suite tests). Ready for Milestone 2.2 upon Owner sign-off.

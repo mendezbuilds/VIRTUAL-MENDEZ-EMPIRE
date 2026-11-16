@@ -75,6 +75,24 @@ export function getOwnerPrincipal(): OwnerPrincipal {
 }
 
 /**
+ * Credential Resolution Context Schema
+ * Explicit architectural boundary: Schema validation strictly models and validates credential references
+ * (e.g. environment variable names or secret vault URIs).
+ * Decrypting or resolving a secret reference to an actual runtime credential is an independent operation
+ * guarded by security governance and authorized execution clearance.
+ */
+export const CredentialResolverContextSchema = z.object({
+  requesterAgentId: z.string().uuid(),
+  requesterLevel: OrganizationalLevelSchema,
+  credentialReference: z.string().min(1),
+  purpose: z.string().min(1),
+  environment: z.enum(['DEVELOPMENT', 'TEST', 'PRODUCTION']).default('PRODUCTION'),
+  authorizedAt: z.string().datetime(),
+});
+
+export type CredentialResolverContext = z.infer<typeof CredentialResolverContextSchema>;
+
+/**
  * Consequential and Restricted Action Classification.
  * Any action classified here CANNOT execute autonomously without explicit Owner authorization.
  * Executive or CEO status NEVER grants permission to execute or autonomously authorize these actions.

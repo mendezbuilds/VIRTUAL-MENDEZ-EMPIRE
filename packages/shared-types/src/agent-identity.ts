@@ -51,14 +51,16 @@ export type AgentOperationalStatus = z.infer<typeof AgentOperationalStatusSchema
  * Agent Supervisor & Reporting Configuration
  * The CEO reports directly to the human Owner principal outside the 30-agent roster.
  */
-export const AgentSupervisorSchema = z.object({
-  supervisorType: z.enum(['AGENT', 'OWNER_PRINCIPAL']).optional(),
-  supervisorAgentId: z.string().uuid().nullable(),
-  supervisorAgentCode: z.string().optional(),
-  ownerPrincipalId: z.string().uuid().optional(),
-  reportsToOwner: z.boolean().default(false),
-  escalationAgentId: z.string().uuid().optional(),
-});
+export const AgentSupervisorSchema = z
+  .object({
+    supervisorType: z.enum(['AGENT', 'OWNER_PRINCIPAL']).optional(),
+    supervisorAgentId: z.string().uuid().nullable(),
+    supervisorAgentCode: z.string().optional(),
+    ownerPrincipalId: z.string().uuid().optional(),
+    reportsToOwner: z.boolean().default(false),
+    escalationAgentId: z.string().uuid().optional(),
+  })
+  .strict();
 
 export type AgentSupervisor = z.infer<typeof AgentSupervisorSchema>;
 
@@ -66,17 +68,19 @@ export type AgentSupervisor = z.infer<typeof AgentSupervisorSchema>;
  * Tool Configuration Reference Schema
  * Models tool capability references and environment/vault secret keys, NEVER raw credentials.
  */
-export const ToolConfigReferenceSchema = z.object({
-  toolName: z.string().min(1),
-  enabled: z.boolean().default(true),
-  credentialReference: z
-    .string()
-    .regex(/^[A-Z0-9_]{3,64}$|^secret:\/\/.+/, {
-      message: "Tool credential reference must be an environment variable name (e.g. 'GITHUB_TOKEN_REF') or secret URI (e.g. 'secret://...'), never a raw credential",
-    })
-    .optional(),
-  timeoutMs: z.number().int().positive().optional(),
-});
+export const ToolConfigReferenceSchema = z
+  .object({
+    toolName: z.string().min(1),
+    enabled: z.boolean().default(true),
+    credentialReference: z
+      .string()
+      .regex(/^[A-Z0-9_]{3,64}$|^secret:\/\/.+/, {
+        message: "Tool credential reference must be an environment variable name (e.g. 'GITHUB_TOKEN_REF') or secret URI (e.g. 'secret://...'), never a raw credential",
+      })
+      .optional(),
+    timeoutMs: z.number().int().positive().optional(),
+  })
+  .strict();
 
 export type ToolConfigReference = z.infer<typeof ToolConfigReferenceSchema>;
 
@@ -89,18 +93,34 @@ export const DISALLOWED_CREDENTIAL_PROPERTY_NAMES = new Set([
   'api_token',
   'secretkey',
   'secret_key',
+  'secret',
+  'clientsecret',
+  'client_secret',
   'accesstoken',
   'access_token',
+  'refreshtoken',
+  'refresh_token',
   'privatekey',
   'private_key',
   'password',
+  'passphrase',
+  'token',
+  'authtoken',
+  'auth_token',
+  'authorization',
+  'auth',
 ]);
 
 /**
  * Validates that an arbitrary configuration object contains NO raw credentials, API keys,
  * bearer tokens, or forbidden credential property names.
+ * Implements cycle-safe object traversal to prevent stack overflows on circular references.
  */
-export function assertNoRawCredentials(data: unknown, path = 'config'): { valid: boolean; errors: string[] } {
+export function assertNoRawCredentials(
+  data: unknown,
+  path = 'config',
+  seen = new WeakSet<object>()
+): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
 
   function inspect(value: unknown, currentPath: string): void {
@@ -111,6 +131,11 @@ export function assertNoRawCredentials(data: unknown, path = 'config'): { valid:
         errors.push(`Raw API key / token detected at '${currentPath}'. Store as environment or vault credential reference instead.`);
       }
     } else if (typeof value === 'object') {
+      if (seen.has(value)) {
+        return; // Cycle detected: safe termination
+      }
+      seen.add(value);
+
       if (Array.isArray(value)) {
         value.forEach((item, idx) => inspect(item, `${currentPath}[${idx}]`));
       } else {
@@ -156,6 +181,7 @@ export const AgentModelConfigSchema = z
     maxParallelTasks: z.number().int().min(1).max(20).default(3),
     timeoutMs: z.number().int().positive().default(60000),
   })
+  .strict()
   .refine(
     (cfg) => {
       const check = assertNoRawCredentials(cfg, 'AgentModelConfig');
@@ -173,16 +199,18 @@ export type AgentModelConfig = z.infer<typeof AgentModelConfigSchema>;
  * Records the formal transfer of an employee between corporate departments,
  * preserving their immutable founding department origin while updating active assignment.
  */
-export const DepartmentTransferRecordSchema = z.object({
-  transferId: z.string().uuid(),
-  fromDepartmentId: DepartmentIdSchema,
-  toDepartmentId: DepartmentIdSchema,
-  effectiveDate: z.string().datetime(),
-  reason: z.string().min(1),
-  authorizedBy: z.string().min(1), // e.g. Owner principal ID or CEO
-  previousConfigVersion: z.string(),
-  newConfigVersion: z.string(),
-});
+export const DepartmentTransferRecordSchema = z
+  .object({
+    transferId: z.string().uuid(),
+    fromDepartmentId: DepartmentIdSchema,
+    toDepartmentId: DepartmentIdSchema,
+    effectiveDate: z.string().datetime(),
+    reason: z.string().min(1),
+    authorizedBy: z.string().min(1), // e.g. Owner principal ID or CEO
+    previousConfigVersion: z.string().regex(/^\d+\.\d+\.\d+$/, { message: 'Must be valid SemVer X.Y.Z' }),
+    newConfigVersion: z.string().regex(/^\d+\.\d+\.\d+$/, { message: 'Must be valid SemVer X.Y.Z' }),
+  })
+  .strict();
 
 export type DepartmentTransferRecord = z.infer<typeof DepartmentTransferRecordSchema>;
 
@@ -192,13 +220,15 @@ export type DepartmentTransferRecord = z.infer<typeof DepartmentTransferRecordSc
  * responsibility, department transfer, and permission reconfigurations.
  * The founding departmentId / originDepartmentId remains permanently anchored here.
  */
-export const AgentIdentitySchema = z.object({
-  id: z.string().uuid(),
-  agentCode: AgentCodeSchema,
-  departmentId: DepartmentIdSchema, // Permanent founding origin department
-  originDepartmentId: DepartmentIdSchema.optional(), // Explicit alias for clarity
-  createdAt: z.string().datetime(),
-});
+export const AgentIdentitySchema = z
+  .object({
+    id: z.string().uuid(),
+    agentCode: AgentCodeSchema,
+    departmentId: DepartmentIdSchema, // Permanent founding origin department
+    originDepartmentId: DepartmentIdSchema.optional(), // Explicit alias for clarity
+    createdAt: z.string().datetime(),
+  })
+  .strict();
 
 export type AgentIdentity = z.infer<typeof AgentIdentitySchema>;
 
@@ -207,25 +237,27 @@ export type AgentIdentity = z.infer<typeof AgentIdentitySchema>;
  * Encapsulates all attributes that may evolve over an employee's lifecycle
  * (job title, supervisor, capabilities, permissions, operational status, version).
  */
-export const AgentConfigurationSchema = z.object({
-  configurationId: z.string().uuid(),
-  agentId: z.string().uuid(),
-  displayName: z.string().min(1).max(100),
-  jobTitle: z.string().min(1).max(100),
-  level: OrganizationalLevelSchema,
-  roleDescription: z.string().min(1),
-  assignedDepartmentId: DepartmentIdSchema.optional(), // Current active department assignment
-  supervisor: AgentSupervisorSchema,
-  assignedResponsibilities: z.array(z.string().min(1)).min(1),
-  requiredCapabilities: z.array(z.string().min(1)).min(1),
-  permissionProfile: PermissionProfileSchema,
-  operationalStatus: AgentOperationalStatusSchema.default('ACTIVE'),
-  modelConfig: AgentModelConfigSchema,
-  departmentTransferHistory: z.array(DepartmentTransferRecordSchema).default([]),
-  configVersion: z.string().default('1.0.0'),
-  effectiveFrom: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-});
+export const AgentConfigurationSchema = z
+  .object({
+    configurationId: z.string().uuid(),
+    agentId: z.string().uuid(),
+    displayName: z.string().min(1).max(100),
+    jobTitle: z.string().min(1).max(100),
+    level: OrganizationalLevelSchema,
+    roleDescription: z.string().min(1),
+    assignedDepartmentId: DepartmentIdSchema.optional(), // Current active department assignment
+    supervisor: AgentSupervisorSchema,
+    assignedResponsibilities: z.array(z.string().min(1)).min(1),
+    requiredCapabilities: z.array(z.string().min(1)).min(1),
+    permissionProfile: PermissionProfileSchema,
+    operationalStatus: AgentOperationalStatusSchema.default('ACTIVE'),
+    modelConfig: AgentModelConfigSchema,
+    departmentTransferHistory: z.array(DepartmentTransferRecordSchema).default([]),
+    configVersion: z.string().regex(/^\d+\.\d+\.\d+$/).default('1.0.0'),
+    effectiveFrom: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict();
 
 export type AgentConfiguration = z.infer<typeof AgentConfigurationSchema>;
 
@@ -325,9 +357,59 @@ export function updateAgentConfiguration(
 }
 
 /**
+ * Compares two SemVer strings (format X.Y.Z).
+ * Returns positive if v1 > v2, negative if v1 < v2, 0 if equal.
+ */
+export function compareSemver(v1: string, v2: string): number {
+  const parse = (v: string): [number, number, number] => {
+    const parts = v.split('.').map((p) => parseInt(p, 10));
+    if (
+      parts.length !== 3 ||
+      parts.some(isNaN) ||
+      parts[0] === undefined ||
+      parts[1] === undefined ||
+      parts[2] === undefined
+    ) {
+      throw new Error(`Invalid SemVer format: '${v}' (expected X.Y.Z)`);
+    }
+    return [parts[0], parts[1], parts[2]];
+  };
+
+  const [maj1, min1, pat1] = parse(v1);
+  const [maj2, min2, pat2] = parse(v2);
+
+  if (maj1 !== maj2) return maj1 - maj2;
+  if (min1 !== min2) return min1 - min2;
+  return pat1 - pat2;
+}
+
+/**
+ * Evaluates whether an authorizer identifier or code possesses authority to approve department transfers.
+ * Only the human Owner (OWNER_PRINCIPAL_ID) or active Executive leadership (e.g. EXEC-CEO) can authorize transfers.
+ */
+export function isAuthorizedTransferAuthority(
+  authorizerIdOrCode: string,
+  agents: AgentRecord[] = CANONICAL_FOUNDING_AGENTS
+): boolean {
+  if (
+    authorizerIdOrCode === OWNER_PRINCIPAL_ID ||
+    authorizerIdOrCode === 'OWNER' ||
+    authorizerIdOrCode === CANONICAL_OWNER_PRINCIPAL.principalId
+  ) {
+    return true;
+  }
+  const authorizer = agents.find((a) => a.id === authorizerIdOrCode || a.agentCode === authorizerIdOrCode);
+  if (authorizer && authorizer.level === 'EXECUTIVE' && authorizer.operationalStatus === 'ACTIVE') {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Transfers an agent to a new corporate department.
  * Preserves the permanent immutable founding department origin in identity,
- * while updating assignedDepartmentId and appending an audit record to departmentTransferHistory.
+ * validates destination existence, verifies transfer authorization,
+ * enforces monotonically increasing SemVer, and appends an immutable audit record to departmentTransferHistory.
  */
 export function transferAgentDepartment(
   record: AgentRecord,
@@ -339,15 +421,46 @@ export function transferAgentDepartment(
     newJobTitle?: string;
     newSupervisor?: AgentSupervisor;
     newVersion?: string;
+    knownAgents?: AgentRecord[];
+    knownDepartments?: Department[];
   }
 ): AgentRecord {
+  const departments = params.knownDepartments ?? CANONICAL_DEPARTMENTS;
+  const agents = params.knownAgents ?? CANONICAL_FOUNDING_AGENTS;
+
+  // 1. Validate destination department exists
+  if (!departments.some((d) => d.id === params.toDepartmentId)) {
+    throw new Error(`Unknown destination department '${params.toDepartmentId}'`);
+  }
+
+  // 2. Reject transfer to same department
   const fromDepartmentId = record.departmentId;
   if (fromDepartmentId === params.toDepartmentId) {
     throw new Error(`Cannot transfer agent ${record.agentCode} to same department '${fromDepartmentId}'`);
   }
 
-  const nextVersion = params.newVersion ?? incrementMinorVersion(record.currentConfig.configVersion);
-  const transferRecord: DepartmentTransferRecord = {
+  // 3. Verify transfer authorization (Owner or Executive authority required)
+  if (!isAuthorizedTransferAuthority(params.authorizedBy, agents)) {
+    throw new Error(
+      `Unauthorized department transfer: '${params.authorizedBy}' lacks executive or Owner transfer authorization authority`
+    );
+  }
+
+  // 4. Validate or compute monotonically increasing configuration version
+  let nextVersion: string;
+  if (params.newVersion) {
+    if (compareSemver(params.newVersion, record.currentConfig.configVersion) <= 0) {
+      throw new Error(
+        `Invalid version transition: new version '${params.newVersion}' must be strictly greater than current version '${record.currentConfig.configVersion}'`
+      );
+    }
+    nextVersion = params.newVersion;
+  } else {
+    nextVersion = incrementMinorVersion(record.currentConfig.configVersion);
+  }
+
+  // 5. Construct transfer record
+  const transferRecord: DepartmentTransferRecord = Object.freeze({
     transferId: randomUUID(),
     fromDepartmentId,
     toDepartmentId: params.toDepartmentId,
@@ -356,17 +469,18 @@ export function transferAgentDepartment(
     authorizedBy: params.authorizedBy,
     previousConfigVersion: record.currentConfig.configVersion,
     newConfigVersion: nextVersion,
-  };
+  });
+
+  // 6. Deep clone and freeze existing transfer history to prevent retrospective modification
+  const existingHistory = (record.currentConfig.departmentTransferHistory ?? []).map((t) => Object.freeze({ ...t }));
+  const updatedTransferHistory = Object.freeze([...existingHistory, transferRecord]);
 
   const updatedConfig: AgentConfiguration = {
     ...record.currentConfig,
     jobTitle: params.newJobTitle ?? record.currentConfig.jobTitle,
     supervisor: params.newSupervisor ?? record.currentConfig.supervisor,
     assignedDepartmentId: params.toDepartmentId,
-    departmentTransferHistory: [
-      ...(record.currentConfig.departmentTransferHistory ?? []),
-      transferRecord,
-    ],
+    departmentTransferHistory: updatedTransferHistory as DepartmentTransferRecord[],
     configurationId: randomUUID(),
     agentId: record.identity.id,
     configVersion: nextVersion,
@@ -374,7 +488,97 @@ export function transferAgentDepartment(
     updatedAt: new Date().toISOString(),
   };
 
+  // 7. Retain immutable founding identity anchor: identity.departmentId is NEVER rewritten
   return createAgentRecord(record.identity, updatedConfig, [...record.configHistory, record.currentConfig]);
+}
+
+/**
+ * Validates the full chain-of-custody and historical continuity of an agent's department transfers.
+ */
+export function validateDepartmentTransferHistory(
+  agent: AgentRecord,
+  departments: Department[] = CANONICAL_DEPARTMENTS
+): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  const validDeptIds = new Set(departments.map((d) => d.id));
+  const history = agent.departmentTransferHistory ?? [];
+
+  if (history.length === 0) {
+    if (agent.departmentId !== agent.originDepartmentId) {
+      errors.push(
+        `Department inconsistency for ${agent.agentCode}: agent has active department '${agent.departmentId}' different from origin '${agent.originDepartmentId}' without transfer history`
+      );
+    }
+    return { valid: errors.length === 0, errors };
+  }
+
+  // First transfer must start from permanent founding department origin
+  const first = history[0]!;
+  if (first.fromDepartmentId !== agent.originDepartmentId) {
+    errors.push(
+      `Transfer history broken for ${agent.agentCode}: first transfer originates from '${first.fromDepartmentId}', expected founding origin '${agent.originDepartmentId}'`
+    );
+  }
+
+  for (let i = 0; i < history.length; i++) {
+    const cur = history[i]!;
+    if (!validDeptIds.has(cur.fromDepartmentId)) {
+      errors.push(`Transfer history record ${i} on ${agent.agentCode} has invalid fromDepartmentId: '${cur.fromDepartmentId}'`);
+    }
+    if (!validDeptIds.has(cur.toDepartmentId)) {
+      errors.push(`Transfer history record ${i} on ${agent.agentCode} has invalid toDepartmentId: '${cur.toDepartmentId}'`);
+    }
+    if (cur.fromDepartmentId === cur.toDepartmentId) {
+      errors.push(`Transfer history record ${i} on ${agent.agentCode} has identical from/to department: '${cur.fromDepartmentId}'`);
+    }
+
+    // Monotonic versioning check within record
+    try {
+      if (compareSemver(cur.newConfigVersion, cur.previousConfigVersion) <= 0) {
+        errors.push(
+          `Transfer history record ${i} on ${agent.agentCode} has non-increasing version: '${cur.previousConfigVersion}' -> '${cur.newConfigVersion}'`
+        );
+      }
+    } catch (e: any) {
+      errors.push(`Transfer history record ${i} on ${agent.agentCode} has invalid version string: ${e.message}`);
+    }
+
+    if (i > 0) {
+      const prev = history[i - 1]!;
+      // Continuity: current fromDepartmentId must equal previous toDepartmentId
+      if (cur.fromDepartmentId !== prev.toDepartmentId) {
+        errors.push(
+          `Transfer history discontinuity on ${agent.agentCode}: record ${i} fromDepartmentId '${cur.fromDepartmentId}' does not match previous toDepartmentId '${prev.toDepartmentId}'`
+        );
+      }
+      // Version continuity: current previousConfigVersion must equal or exceed previous newConfigVersion
+      try {
+        if (compareSemver(cur.previousConfigVersion, prev.newConfigVersion) < 0) {
+          errors.push(
+            `Transfer history version mismatch on ${agent.agentCode}: record ${i} previous version '${cur.previousConfigVersion}' is older than previous transfer result '${prev.newConfigVersion}'`
+          );
+        }
+      } catch (e: any) {
+        errors.push(`Transfer history version error on ${agent.agentCode}: ${e.message}`);
+      }
+      // Monotonic timestamps
+      if (new Date(cur.effectiveDate).getTime() < new Date(prev.effectiveDate).getTime()) {
+        errors.push(
+          `Transfer history timestamp regression on ${agent.agentCode}: record ${i} (${cur.effectiveDate}) precedes previous transfer (${prev.effectiveDate})`
+        );
+      }
+    }
+  }
+
+  // Final agreement: active department MUST match last transfer's toDepartmentId
+  const last = history[history.length - 1]!;
+  if (agent.departmentId !== last.toDepartmentId) {
+    errors.push(
+      `Department disagreement for ${agent.agentCode}: active department '${agent.departmentId}' does not match final transfer target '${last.toDepartmentId}'`
+    );
+  }
+
+  return { valid: errors.length === 0, errors };
 }
 
 function incrementMinorVersion(version: string): string {
@@ -486,7 +690,10 @@ function createFoundingAgent(
     jobTitle,
     level,
     roleDescription,
-    supervisor,
+    supervisor: {
+      supervisorType: supervisor.supervisorType ?? (supervisor.reportsToOwner ? 'OWNER_PRINCIPAL' : 'AGENT'),
+      ...supervisor,
+    },
     assignedResponsibilities,
     requiredCapabilities,
     permissionProfile,
@@ -1741,6 +1948,7 @@ export function getDepartmentDirector(deptId: DepartmentId): AgentRecord | undef
  * 12. Owner principal boundary: The human Owner principal is distinct and excluded from workforce roster
  * 13. Credential safety: Agent and tool configurations contain zero raw API keys or secrets
  * 14. Department transfer history integrity
+ * 15. Record, identity, and configuration consistency
  */
 export function validateOrganizationalRegistry(
   agents: AgentRecord[] = CANONICAL_FOUNDING_AGENTS,
@@ -1751,17 +1959,48 @@ export function validateOrganizationalRegistry(
   const codeMap = new Map<string, AgentRecord>();
   const validDeptIds = new Set(departments.map((d) => d.id));
 
-  // 0. Owner Principal Boundary Check
-  // The human Owner principal is a distinct authority principal outside the AI workforce registry
+  // 0. Workforce Roster Size and Department Counts Explicit Enforcement
+  if (agents.length !== 30) {
+    errors.push(`Workforce roster size mismatch: expected exactly 30 founding AI employee records, received ${agents.length}`);
+  }
+
+  if (departments.length !== 9) {
+    errors.push(`Department count mismatch: expected exactly 9 canonical departments, received ${departments.length}`);
+  }
+
+  const MANDATORY_CANONICAL_DEPTS = [
+    'executive_office',
+    'financial_intelligence',
+    'technology_engineering',
+    'business_development',
+    'marketing_growth',
+    'operations_administration',
+    'opportunity_acquisition',
+    'research_intelligence',
+    'security_governance',
+  ] as const;
+
+  for (const mDept of MANDATORY_CANONICAL_DEPTS) {
+    if (!validDeptIds.has(mDept)) {
+      errors.push(`Missing mandatory canonical department: '${mDept}'`);
+    }
+  }
+
+  // 1. Separation of Human Owner Principal from AI Workforce Registry
   for (const agent of agents) {
-    if (agent.id === OWNER_PRINCIPAL_ID) {
+    if (
+      agent.id === OWNER_PRINCIPAL_ID ||
+      agent.agentCode === 'OWNER' ||
+      agent.displayName === 'Stephen Mendez' ||
+      agent.permissionProfile.scope === 'OWNER_ONLY'
+    ) {
       errors.push(
-        `Owner principal '${OWNER_PRINCIPAL_ID}' cannot be included in the AI workforce registry. The Owner is a distinct human authority principal.`
+        `Owner principal '${OWNER_PRINCIPAL_ID}' or OWNER_ONLY scope cannot be included in the AI workforce registry. The Owner is a distinct human authority principal.`
       );
     }
   }
 
-  // 1. Uniqueness of IDs and Codes & Department Validity
+  // 2. Uniqueness of IDs, Codes, Record Consistency & Department Validity
   for (const agent of agents) {
     if (idMap.has(agent.id)) {
       errors.push(`Duplicate agent ID detected: ${agent.id}`);
@@ -1775,6 +2014,33 @@ export function validateOrganizationalRegistry(
       codeMap.set(agent.agentCode, agent);
     }
 
+    // Identity and Record consistency checks
+    if (agent.id !== agent.identity.id) {
+      errors.push(`Agent ID inconsistency: record.id '${agent.id}' does not match identity.id '${agent.identity.id}'`);
+    }
+    if (agent.currentConfig.agentId !== agent.identity.id) {
+      errors.push(
+        `Agent configuration inconsistency: currentConfig.agentId '${agent.currentConfig.agentId}' does not match identity.id '${agent.identity.id}'`
+      );
+    }
+    if (agent.agentCode !== agent.identity.agentCode) {
+      errors.push(
+        `Agent code inconsistency: record.agentCode '${agent.agentCode}' does not match identity.agentCode '${agent.identity.agentCode}'`
+      );
+    }
+    if (agent.originDepartmentId !== agent.identity.departmentId) {
+      errors.push(
+        `Agent origin department inconsistency: originDepartmentId '${agent.originDepartmentId}' does not match identity.departmentId '${agent.identity.departmentId}'`
+      );
+    }
+
+    const expectedActiveDept = agent.currentConfig.assignedDepartmentId ?? agent.identity.departmentId;
+    if (agent.departmentId !== expectedActiveDept) {
+      errors.push(
+        `Agent active department inconsistency: record.departmentId '${agent.departmentId}' does not match expected active department '${expectedActiveDept}'`
+      );
+    }
+
     // Invalid department reference
     if (!validDeptIds.has(agent.departmentId) || !validDeptIds.has(agent.originDepartmentId)) {
       errors.push(`Agent ${agent.agentCode} references invalid department: '${agent.departmentId}'`);
@@ -1786,7 +2052,7 @@ export function validateOrganizationalRegistry(
       errors.push(`Agent ${agent.agentCode} has invalid permission profile: ${profileCheck.errors.join('; ')}`);
     }
 
-    // Model configuration & tool configuration credential safety check
+    // Model configuration & tool configuration credential safety check (cycle-safe)
     const credentialCheck = assertNoRawCredentials(agent.currentConfig, agent.agentCode);
     if (!credentialCheck.valid) {
       errors.push(
@@ -1795,17 +2061,13 @@ export function validateOrganizationalRegistry(
     }
 
     // Department transfer history validation
-    for (const transfer of agent.departmentTransferHistory) {
-      if (!validDeptIds.has(transfer.fromDepartmentId)) {
-        errors.push(`Agent ${agent.agentCode} has transfer record with invalid fromDepartmentId: '${transfer.fromDepartmentId}'`);
-      }
-      if (!validDeptIds.has(transfer.toDepartmentId)) {
-        errors.push(`Agent ${agent.agentCode} has transfer record with invalid toDepartmentId: '${transfer.toDepartmentId}'`);
-      }
+    const transferCheck = validateDepartmentTransferHistory(agent, departments);
+    if (!transferCheck.valid) {
+      errors.push(...transferCheck.errors);
     }
   }
 
-  // 2. Department Director Assignment Check
+  // 3. Department Director Assignment Check
   for (const dept of departments) {
     const director = agents.find(
       (a) => a.departmentId === dept.id && (a.level === 'DIRECTOR' || a.level === 'EXECUTIVE') && a.operationalStatus === 'ACTIVE'
@@ -1815,24 +2077,50 @@ export function validateOrganizationalRegistry(
     }
   }
 
-  // 3. Supervisor Resolution, Seniority & Self-Reporting Check
+  // 4. Supervisor Resolution, Consistency, Seniority & Self-Reporting Check
   for (const agent of agents) {
-    // Owner principal reporting check
-    if (agent.supervisor.reportsToOwner || agent.supervisor.supervisorType === 'OWNER_PRINCIPAL') {
-      if (agent.level !== 'EXECUTIVE') {
+    const isOwnerReport = agent.supervisor.reportsToOwner || agent.supervisor.supervisorType === 'OWNER_PRINCIPAL';
+
+    if (isOwnerReport) {
+      // ONLY canonical Executive CEO can report to Owner principal
+      if (agent.agentCode !== 'EXEC-CEO' || agent.level !== 'EXECUTIVE') {
         errors.push(
-          `Non-executive agent ${agent.agentCode} (${agent.level}) cannot report directly to the Owner principal. Only executive leadership may report to Owner.`
+          `Unauthorized Owner reporting: Only the canonical Executive CEO (EXEC-CEO) may report directly to the Owner principal; agent ${agent.agentCode} (${agent.level}) cannot report directly to the Owner principal.`
+        );
+      }
+
+      // Exact field consistency for Owner reporting
+      if (!agent.supervisor.reportsToOwner) {
+        errors.push(
+          `Supervisor consistency mismatch on ${agent.agentCode}: supervisorType is 'OWNER_PRINCIPAL' but reportsToOwner is false`
+        );
+      }
+      if (agent.supervisor.supervisorType !== 'OWNER_PRINCIPAL') {
+        errors.push(
+          `Supervisor consistency mismatch on ${agent.agentCode}: reportsToOwner is true but supervisorType is not 'OWNER_PRINCIPAL'`
         );
       }
       if (agent.supervisor.supervisorAgentId !== null) {
-        errors.push(`Agent ${agent.agentCode} reports to Owner; supervisorAgentId must be null`);
+        errors.push(`Supervisor consistency mismatch on ${agent.agentCode}: reports to Owner; supervisorAgentId must be null`);
       }
-      if (agent.supervisor.ownerPrincipalId && agent.supervisor.ownerPrincipalId !== OWNER_PRINCIPAL_ID) {
+      if (agent.supervisor.ownerPrincipalId !== OWNER_PRINCIPAL_ID) {
         errors.push(
-          `Agent ${agent.agentCode} references invalid ownerPrincipalId '${agent.supervisor.ownerPrincipalId}' (expected ${OWNER_PRINCIPAL_ID})`
+          `Invalid Owner principal reference on agent ${agent.agentCode}: expected '${OWNER_PRINCIPAL_ID}', got '${agent.supervisor.ownerPrincipalId}'`
         );
       }
       continue;
+    }
+
+    // Non-owner reporting agents
+    if (agent.supervisor.ownerPrincipalId !== undefined) {
+      errors.push(
+        `Supervisor consistency mismatch on ${agent.agentCode}: non-Owner reporting agent cannot specify ownerPrincipalId`
+      );
+    }
+    if (agent.supervisor.supervisorType && agent.supervisor.supervisorType !== 'AGENT') {
+      errors.push(
+        `Supervisor consistency mismatch on ${agent.agentCode}: non-Owner reporting agent must have supervisorType 'AGENT'`
+      );
     }
 
     const supId = agent.supervisor.supervisorAgentId;
@@ -1861,9 +2149,19 @@ export function validateOrganizationalRegistry(
         `Hierarchy seniority violation: ${agent.agentCode} (${agent.level}) reports to less senior ${supervisor.agentCode} (${supervisor.level})`
       );
     }
+
+    // Specialist department consistency check:
+    // Specialists must report within their own active department, or to an Executive
+    if (agent.level === 'SPECIALIST') {
+      if (supervisor.level !== 'EXECUTIVE' && supervisor.departmentId !== agent.departmentId) {
+        errors.push(
+          `Department supervisor mismatch: Specialist ${agent.agentCode} in department '${agent.departmentId}' reports to supervisor ${supervisor.agentCode} in different department '${supervisor.departmentId}'`
+        );
+      }
+    }
   }
 
-  // 4. Circular Reporting Chain Detection (Cycles)
+  // 5. Circular Reporting Chain Detection (Cycles)
   for (const agent of agents) {
     const visited = new Set<string>();
     let current: AgentRecord | undefined = agent;

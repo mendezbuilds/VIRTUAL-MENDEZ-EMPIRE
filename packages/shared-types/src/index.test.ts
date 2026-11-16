@@ -15,10 +15,14 @@ import {
   createAgentRecord,
   updateAgentConfiguration,
   transferAgentDepartment,
+  compareSemver,
+  isAuthorizedTransferAuthority,
+  validateDepartmentTransferHistory,
   DepartmentTransferRecordSchema,
   ToolConfigReferenceSchema,
   assertNoRawCredentials,
   AgentModelConfigSchema,
+  AgentSupervisorSchema,
   CANONICAL_FOUNDING_AGENTS,
   findAgentById,
   findAgentByCode,
@@ -35,6 +39,7 @@ import {
   OwnerPrincipalSchema,
   CANONICAL_OWNER_PRINCIPAL,
   isOwnerPrincipal,
+  CredentialResolverContextSchema,
   CANONICAL_APPROVAL_REQUIREMENTS,
   MANDATORY_PROHIBITED_FOR_ALL_AGENTS,
   assertNonOwnerProfileValid,
@@ -92,7 +97,9 @@ function cloneFoundingRoster(): AgentRecord[] {
           ...a.currentConfig.modelConfig,
           allowedTools: [...a.currentConfig.modelConfig.allowedTools],
         },
-      }
+        departmentTransferHistory: [...(a.currentConfig.departmentTransferHistory ?? [])],
+      },
+      [...a.configHistory]
     )
   );
 }
@@ -1138,6 +1145,289 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
       const checkField = assertNoRawCredentials(configWithRawField);
       expect(checkField.valid).toBe(false);
       expect(checkField.errors.some((e) => e.includes("Disallowed credential property 'apiKey'"))).toBe(true);
+    });
+  });
+
+  // =========================================================================
+  // 14. M2.1 Final Corrective Pass: Deep Verification of Transfers, Registry, Credentials, and Record Consistency
+  // =========================================================================
+  describe('14. M2.1 Final Corrective Pass: Deep Verification of Transfers, Registry, Credentials, and Record Consistency', () => {
+    // A. Department Transfer Integrity
+    it('14.1 Enforces complete department transfer integrity: destination existence, authorization verification, version monotonicity, and continuity', () => {
+      const engineer = findAgentByCode('TECH-FSE')!;
+
+      // 1. Destination department existence check: invalid department must throw
+      expect(() =>
+        transferAgentDepartment(engineer, {
+          toDepartmentId: 'non_existent_dept' as any,
+          reason: 'Invalid department transfer',
+          authorizedBy: 'EXEC-CEO',
+        })
+      ).toThrow("Unknown destination department 'non_existent_dept'");
+
+      // 2. Transfer authorization check: non-executive / non-owner caller must throw
+      expect(() =>
+        transferAgentDepartment(engineer, {
+          toDepartmentId: 'opportunity_acquisition',
+          reason: 'Unauthorized specialist transfer',
+          authorizedBy: 'TECH-QA', // Specialist lacks transfer authorization authority
+        })
+      ).toThrow("Unauthorized department transfer: 'TECH-QA' lacks executive or Owner transfer authorization authority");
+
+      // 3. Monotonic SemVer versioning: non-increasing version must throw
+      expect(() =>
+        transferAgentDepartment(engineer, {
+          toDepartmentId: 'opportunity_acquisition',
+          reason: 'Regressive version transfer',
+          authorizedBy: 'EXEC-CEO',
+          newVersion: '1.0.0', // <= current version 1.0.0
+        })
+      ).toThrow("Invalid version transition: new version '1.0.0' must be strictly greater than current version '1.0.0'");
+
+      // Invalid SemVer string format must throw
+      expect(() =>
+        transferAgentDepartment(engineer, {
+          toDepartmentId: 'opportunity_acquisition',
+          reason: 'Malformed version transfer',
+          authorizedBy: 'EXEC-CEO',
+          newVersion: 'v2-beta',
+        })
+      ).toThrow("Invalid SemVer format: 'v2-beta'");
+
+      // 4. Multi-step valid transfer continuity
+      const transfer1 = transferAgentDepartment(engineer, {
+        toDepartmentId: 'opportunity_acquisition',
+        reason: 'Rotate to opportunity scouting',
+        authorizedBy: 'EXEC-CEO',
+        newVersion: '1.1.0',
+        effectiveDate: '2026-02-01T00:00:00.000Z',
+      });
+
+      const transfer2 = transferAgentDepartment(transfer1, {
+        toDepartmentId: 'research_intelligence',
+        reason: 'Rotate to technology research',
+        authorizedBy: OWNER_PRINCIPAL_ID, // Owner authorized
+        newVersion: '1.2.0',
+        effectiveDate: '2026-03-01T00:00:00.000Z',
+      });
+
+      // Transfer history continuity passes validation
+      const continuityResult = validateDepartmentTransferHistory(transfer2);
+      expect(continuityResult.valid).toBe(true);
+      expect(continuityResult.errors).toEqual([]);
+
+      // 5. Final transfer record agreement
+      expect(transfer2.departmentId).toBe('research_intelligence');
+      expect(transfer2.originDepartmentId).toBe('technology_engineering');
+      expect(transfer2.departmentTransferHistory).toHaveLength(2);
+
+      // 6. Transfer continuity violation detection: artificial discontinuity between step 1 and step 2
+      const brokenConfig = {
+        ...transfer2.currentConfig,
+        departmentTransferHistory: [
+          transfer2.departmentTransferHistory[0]!,
+          {
+            ...transfer2.departmentTransferHistory[1]!,
+            fromDepartmentId: 'business_development' as const, // Discontinuity: expected 'opportunity_acquisition'
+          },
+        ],
+      };
+      const brokenChainAgent = createAgentRecord(transfer2.identity, brokenConfig, transfer2.configHistory);
+      const brokenCheck = validateDepartmentTransferHistory(brokenChainAgent);
+      expect(brokenCheck.valid).toBe(false);
+      expect(brokenCheck.errors.some((e) => e.includes('Transfer history discontinuity'))).toBe(true);
+
+      // 7. Retrospective modification prevention: transfer records are frozen
+      expect(Object.isFrozen(transfer2.departmentTransferHistory[0])).toBe(true);
+    });
+
+    // B. Organizational Registry Integrity
+    it('14.2 Enforces exact 30-agent workforce roster size and 9 canonical corporate departments in registry validation', () => {
+      const fullRoster = cloneFoundingRoster();
+      expect(validateOrganizationalRegistry(fullRoster).valid).toBe(true);
+
+      // 1. Roster with 29 agents (one missing) must fail
+      const understaffedRoster = fullRoster.slice(0, 29);
+      const understaffedCheck = validateOrganizationalRegistry(understaffedRoster);
+      expect(understaffedCheck.valid).toBe(false);
+      expect(understaffedCheck.errors.some((e) => e.includes('Workforce roster size mismatch: expected exactly 30'))).toBe(true);
+
+      // 2. Roster with 31 agents (one duplicate clone added) must fail
+      const extraId = randomUUID();
+      const extraAgent = createAgentRecord(
+        {
+          id: extraId,
+          agentCode: 'TECH-EXTRA',
+          departmentId: 'technology_engineering',
+          createdAt: new Date().toISOString(),
+        },
+        {
+          ...fullRoster[0]!.currentConfig,
+          configurationId: randomUUID(),
+          agentId: extraId,
+          assignedDepartmentId: 'technology_engineering',
+        }
+      );
+      const overstaffedRoster = [...fullRoster, extraAgent];
+      const overstaffedCheck = validateOrganizationalRegistry(overstaffedRoster);
+      expect(overstaffedCheck.valid).toBe(false);
+      expect(overstaffedCheck.errors.some((e) => e.includes('Workforce roster size mismatch: expected exactly 30'))).toBe(true);
+
+      // 3. Department count mismatch (e.g. only 8 departments supplied) must fail
+      const incompleteDepts = CANONICAL_DEPARTMENTS.slice(0, 8);
+      const incompleteDeptCheck = validateOrganizationalRegistry(fullRoster, incompleteDepts);
+      expect(incompleteDeptCheck.valid).toBe(false);
+      expect(incompleteDeptCheck.errors.some((e) => e.includes('Department count mismatch: expected exactly 9'))).toBe(true);
+    });
+
+    // B. Owner Reporting Consistency & Restriction to EXEC-CEO
+    it('14.3 Enforces strict Owner reporting consistency and restricts direct Owner reporting exclusively to EXEC-CEO', () => {
+      const roster = cloneFoundingRoster();
+
+      // 1. Non-CEO Executive (e.g. Chief Operating Officer) attempting to report to Owner is rejected
+      const coo = roster.find((a) => a.agentCode === 'EXEC-COO')!;
+      coo.currentConfig.supervisor.reportsToOwner = true;
+      coo.currentConfig.supervisor.supervisorType = 'OWNER_PRINCIPAL';
+      coo.currentConfig.supervisor.ownerPrincipalId = OWNER_PRINCIPAL_ID;
+      coo.currentConfig.supervisor.supervisorAgentId = null;
+
+      const cooCheck = validateOrganizationalRegistry(roster);
+      expect(cooCheck.valid).toBe(false);
+      expect(cooCheck.errors.some((e) => e.includes('Unauthorized Owner reporting: Only the canonical Executive CEO'))).toBe(true);
+
+      // Reset COO
+      coo.currentConfig.supervisor.reportsToOwner = false;
+      coo.currentConfig.supervisor.supervisorType = 'AGENT';
+      coo.currentConfig.supervisor.ownerPrincipalId = undefined;
+      coo.currentConfig.supervisor.supervisorAgentId = roster.find((a) => a.agentCode === 'EXEC-CEO')!.id;
+
+      // 2. Inconsistent CEO supervisor configuration: reportsToOwner=true but supervisorType='AGENT'
+      const ceo = roster.find((a) => a.agentCode === 'EXEC-CEO')!;
+      ceo.currentConfig.supervisor.supervisorType = 'AGENT';
+      const supervisorTypeMismatch = validateOrganizationalRegistry(roster);
+      expect(supervisorTypeMismatch.valid).toBe(false);
+      expect(supervisorTypeMismatch.errors.some((e) => e.includes("supervisorType is not 'OWNER_PRINCIPAL'"))).toBe(true);
+
+      // 3. Inconsistent CEO supervisor configuration: reportsToOwner=true but supervisorAgentId is not null
+      ceo.currentConfig.supervisor.supervisorType = 'OWNER_PRINCIPAL';
+      ceo.currentConfig.supervisor.supervisorAgentId = randomUUID();
+      const ceoNonEmptySupervisor = validateOrganizationalRegistry(roster);
+      expect(ceoNonEmptySupervisor.valid).toBe(false);
+      expect(ceoNonEmptySupervisor.errors.some((e) => e.includes('supervisorAgentId must be null'))).toBe(true);
+
+      // 4. Inconsistent non-owner agent specifying ownerPrincipalId
+      const engineer = roster.find((a) => a.agentCode === 'TECH-FSE')!;
+      ceo.currentConfig.supervisor.supervisorAgentId = null;
+      engineer.currentConfig.supervisor.ownerPrincipalId = OWNER_PRINCIPAL_ID;
+      const illegalOwnerPrincipalRef = validateOrganizationalRegistry(roster);
+      expect(illegalOwnerPrincipalRef.valid).toBe(false);
+      expect(illegalOwnerPrincipalRef.errors.some((e) => e.includes('non-Owner reporting agent cannot specify ownerPrincipalId'))).toBe(true);
+    });
+
+    // C. Credential Security & Strict Schemas
+    it('14.4 Enforces expanded credential property detection, schema strictness, cycle-safety, and resolution boundary', () => {
+      // 1. Expanded sensitive property detection (secret, clientSecret, token, refreshToken, authorization, auth, etc.)
+      const sensitiveKeys = [
+        'secret',
+        'token',
+        'clientSecret',
+        'client_secret',
+        'refreshToken',
+        'refresh_token',
+        'authorization',
+        'auth',
+        'passphrase',
+        'privateKey',
+        'password',
+      ];
+
+      for (const key of sensitiveKeys) {
+        const testObj = { [key]: 'any_dummy_credential_value' };
+        const check = assertNoRawCredentials(testObj, 'test');
+        expect(check.valid, `Expected property '${key}' to be flagged as disallowed credential`).toBe(false);
+        expect(check.errors.some((e) => e.includes(`Disallowed credential property '${key}'`))).toBe(true);
+      }
+
+      // 2. Strict schema rejection of unexpected properties (.strict())
+      const baseModelConfig = {
+        modelProvider: 'mock' as const,
+        modelId: 'mock-llm-v1',
+        temperature: 0.3,
+        systemPrompt: 'System prompt',
+        allowedTools: [],
+        toolConfigs: [],
+        maxParallelTasks: 3,
+        timeoutMs: 60000,
+      };
+
+      const poisonedModelConfig = {
+        ...baseModelConfig,
+        injectedMaliciousField: 'unexpected_value',
+      };
+      expect(AgentModelConfigSchema.safeParse(poisonedModelConfig).success).toBe(false);
+
+      const baseToolConfig = {
+        toolName: 'web_search',
+        enabled: true,
+      };
+      const poisonedToolConfig = {
+        ...baseToolConfig,
+        apiKey: 'sk-12345678901234567890',
+      };
+      expect(ToolConfigReferenceSchema.safeParse(poisonedToolConfig).success).toBe(false);
+
+      // 3. Cycle-safety in recursive credential inspection
+      const cyclicObject: any = {
+        name: 'SafeConfig',
+        nested: {},
+      };
+      cyclicObject.nested.parent = cyclicObject; // Circular link
+      cyclicObject.self = cyclicObject; // Self reference
+
+      // Must complete safely without recursion overflow or hanging
+      const cycleCheck = assertNoRawCredentials(cyclicObject);
+      expect(cycleCheck.valid).toBe(true);
+
+      // 4. Credential resolution context boundary contract
+      const resolverRequest = {
+        requesterAgentId: '00000000-0000-0000-0000-000000000007',
+        requesterLevel: 'DIRECTOR' as const,
+        credentialReference: 'OPENAI_PRODUCTION_KEY_REF',
+        purpose: 'Executing autonomous financial market analysis',
+        environment: 'PRODUCTION' as const,
+        authorizedAt: new Date().toISOString(),
+      };
+      expect(CredentialResolverContextSchema.safeParse(resolverRequest).success).toBe(true);
+    });
+
+    // D. Agent Record Consistency
+    it('14.5 Enforces agent record internal consistency and specialist-supervisor department alignment', () => {
+      const roster = cloneFoundingRoster();
+
+      // 1. Identity ID mismatch in createAgentRecord
+      const identity = { ...roster[0]!.identity };
+      const configWithMismatchedAgentId = {
+        ...roster[0]!.currentConfig,
+        agentId: randomUUID(), // Mismatch
+      };
+      expect(() => createAgentRecord(identity, configWithMismatchedAgentId)).toThrow(
+        'Configuration agentId mismatch'
+      );
+
+      // 2. Department-supervisor mismatch: Specialist in Technology assigned supervisor in Financial Intelligence
+      const corruptedRoster = cloneFoundingRoster();
+      const techSpecialist = corruptedRoster.find((a) => a.agentCode === 'TECH-FSE')!;
+      const finDirector = corruptedRoster.find((a) => a.agentCode === 'FIN-CFO')!;
+      techSpecialist.currentConfig.supervisor.supervisorAgentId = finDirector.id;
+      techSpecialist.currentConfig.supervisor.supervisorAgentCode = finDirector.agentCode;
+
+      const mismatchCheck = validateOrganizationalRegistry(corruptedRoster);
+      expect(mismatchCheck.valid).toBe(false);
+      expect(
+        mismatchCheck.errors.some((e) =>
+          e.includes("Department supervisor mismatch: Specialist TECH-FSE in department 'technology_engineering' reports to supervisor FIN-CFO in different department 'financial_intelligence'")
+        )
+      ).toBe(true);
     });
   });
 });
