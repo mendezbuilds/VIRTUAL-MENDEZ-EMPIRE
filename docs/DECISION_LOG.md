@@ -114,12 +114,15 @@
 - **Status:** APPROVED (Milestone 2.1 Final Corrective Directive)
 - **Context:** Independent technical review of Milestone 2.1 identified critical targeted enhancements across four areas: department transfer integrity, organizational registry cardinality and supervisor consistency, credential detection depth and schema strictness, and internal record consistency.
 - **Decision:**
-  1. **Department Transfer Integrity & Continuity:**
+  1. **Department Transfer Integrity & Authorization Continuity:**
      - Enforce destination department existence check.
-     - Validate transfer authorization authority (`isAuthorizedTransferAuthority()`), allowing only the Owner (`OWNER_PRINCIPAL_ID`) or active Executive leadership (`EXEC-CEO`, `EXEC-COO`).
-     - Enforce monotonically increasing SemVer version transitions (`compareSemver()`).
-     - Validate transfer history continuity: record $i$ `fromDepartmentId` must strictly match record $i-1$ `toDepartmentId`, and versions must not regress.
-     - Enforce final transfer record agreement: an agent's active `departmentId` must match the final transfer's target department.
+     - Strictly require canonical Owner principal ID (`OWNER_PRINCIPAL_ID`), rejecting informal `'OWNER'` strings or spoofed identities.
+     - Validate executive authorization against trusted registry records, requiring active operational status and Executive Office department assignment. Reject forged executive records.
+     - Enforce strict SemVer 2.0 numeric `X.Y.Z` validation (`STRICT_SEMVER_REGEX`), strictly rejecting malformed suffixes, negative values, leading zeros, and unsafe numeric values.
+     - Enforce strictly increasing transfer timestamps ($t_i > t_{i-1}$), rejecting equal timestamps, earlier timestamps, and invalid date strings.
+     - Validate configuration version continuity: reject version gaps, regressions, and active-configuration mismatches.
+     - Validate transfer history continuity: record $i$ `fromDepartmentId` must strictly match record $i-1$ `toDepartmentId`.
+     - Enforce final transfer record agreement: active `departmentId` must match the final transfer's target department.
      - Deep-freeze transfer records (`Object.freeze()`) to prevent retrospective tampering.
      - Permanently anchor founding department identity (`originDepartmentId`).
   2. **Workforce Cardinality & Strict CEO-Only Owner Reporting:**
@@ -135,4 +138,4 @@
   4. **Agent Record Internal Consistency & Specialist Supervisor Alignment:**
      - Guard `createAgentRecord()` to ensure `currentConfig.agentId` matches `identity.id`.
      - Enforce that a specialist's supervisor must belong to the specialist's active department or the Executive Office.
-- **Consequences:** Provides bulletproof integrity, auditability, and security across the entire workforce data layer. Validated with 55 tests in `@vme/shared-types` (93 total suite tests). Ready for Milestone 2.2 upon Owner sign-off.
+- **Consequences:** Provides bulletproof integrity, auditability, and security across the entire workforce data layer. Validated with 59 tests in `@vme/shared-types` (97 total suite tests). Ready for Milestone 2.2 upon Owner sign-off.

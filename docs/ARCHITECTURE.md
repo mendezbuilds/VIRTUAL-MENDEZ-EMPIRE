@@ -88,14 +88,11 @@ VME establishes nine foundational departments staffed by 30 canonical AI employe
 ### 2.5 Department Transfers & Permanent Origin Immutability
 - **Permanent Department Origin:** An employee's founding department origin (`identity.departmentId` / `identity.originDepartmentId`) is immutable and never rewritten.
 - **Versioned Department Assignment:** Department reassignments are executed via `transferAgentDepartment()`, setting `currentConfig.assignedDepartmentId` and appending a deeply frozen audit record to `departmentTransferHistory`.
-- **Transfer Authorization:** Department transfers require verified authorization from either the human Owner (`OWNER_PRINCIPAL_ID`) or active Executive leadership (`EXEC-CEO`, `EXEC-COO`).
-- **Transfer Continuity & SemVer Monotonicity:** Each transfer enforces:
-  1. Destination department exists and differs from current department.
-  2. Monotonically increasing SemVer configuration versions (`newConfigVersion > previousConfigVersion`).
-  3. Continuous transfer chaining (`fromDepartmentId` of record $i$ strictly equals `toDepartmentId` of record $i-1$).
-  4. Monotonically advancing effective timestamps.
-  5. Active department strictly matches the final transfer record's `toDepartmentId`.
-  6. Audit records are deep-frozen to prevent retrospective modification.
+- **Transfer Authorization Integrity:** Department transfers strictly require verified authorization from either the human Owner principal (`OWNER_PRINCIPAL_ID`) or active Executive leadership (`EXEC-CEO`, `EXEC-COO`) verified against trusted registry records. Informal strings like `'OWNER'`, spoofed owner identifiers, and forged executive records are rejected.
+- **Strict SemVer 2.0 Invariants:** Monotonically increasing SemVer configuration versions are enforced via strict numeric `X.Y.Z` validation (`STRICT_SEMVER_REGEX`). Malformed suffixes (`-beta`), leading zeros (`01.0.0`), negative values, truncated forms, extra segments, and unsafe integers are strictly rejected.
+- **Strictly Increasing Transfer Timestamps:** Each transfer requires valid date strings and strictly advancing effective timestamps ($t_i > t_{i-1}$). Equal timestamps and earlier timestamps are rejected.
+- **Configuration Version Continuity:** Transfer history is validated against the agent's configuration history and active configuration version. Version gaps (unexplained versions), regressions, and active-configuration mismatches are strictly rejected.
+- **Chain Continuity & Immutability:** Continuous transfer chaining ($record_i.\text{fromDepartmentId} == record_{i-1}.\text{toDepartmentId}$) is enforced, active department must agree with the final transfer target, and all audit records are deep-frozen.
 
 ### 2.6 Human Owner Principal & Organizational Registry Cardinality
 - **Distinct Authority Principal:** The human Owner (Stephen Mendez) is represented as `CANONICAL_OWNER_PRINCIPAL` with reserved ID `00000000-0000-0000-0000-000000000000` (`OWNER_PRINCIPAL_ID`), completely outside the 30-agent AI workforce registry.

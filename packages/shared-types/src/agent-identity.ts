@@ -357,26 +357,54 @@ export function updateAgentConfiguration(
 }
 
 /**
+/**
+ * Strict SemVer 2.0 regex matching non-negative numeric X.Y.Z with no leading zeros.
+ * Prohibits prefixes, suffixes, whitespace, negative numbers, leading zeros, and malformed segments.
+ */
+export const STRICT_SEMVER_REGEX = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+/**
+ * Parses and validates a strict SemVer X.Y.Z string.
+ * Rejects malformed suffixes, negative values, leading-zero numeric components where invalid,
+ * truncated versions, and values exceeding Number.MAX_SAFE_INTEGER.
+ */
+export function parseSemver(v: string): [number, number, number] {
+  if (typeof v !== 'string') {
+    throw new Error(`Invalid SemVer format: expected string, received ${typeof v}`);
+  }
+
+  const match = STRICT_SEMVER_REGEX.exec(v);
+  if (!match) {
+    throw new Error(
+      `Invalid SemVer format: '${v}' (expected strict X.Y.Z with non-negative numeric components and no leading zeros or suffixes)`
+    );
+  }
+
+  const maj = Number(match[1]);
+  const min = Number(match[2]);
+  const pat = Number(match[3]);
+
+  if (!Number.isSafeInteger(maj) || maj > Number.MAX_SAFE_INTEGER) {
+    throw new Error(`Invalid SemVer format: major component in '${v}' exceeds safe integer limit`);
+  }
+  if (!Number.isSafeInteger(min) || min > Number.MAX_SAFE_INTEGER) {
+    throw new Error(`Invalid SemVer format: minor component in '${v}' exceeds safe integer limit`);
+  }
+  if (!Number.isSafeInteger(pat) || pat > Number.MAX_SAFE_INTEGER) {
+    throw new Error(`Invalid SemVer format: patch component in '${v}' exceeds safe integer limit`);
+  }
+
+  return [maj, min, pat];
+}
+
+/**
  * Compares two SemVer strings (format X.Y.Z).
  * Returns positive if v1 > v2, negative if v1 < v2, 0 if equal.
+ * Rejects any non-strict SemVer version strings.
  */
 export function compareSemver(v1: string, v2: string): number {
-  const parse = (v: string): [number, number, number] => {
-    const parts = v.split('.').map((p) => parseInt(p, 10));
-    if (
-      parts.length !== 3 ||
-      parts.some(isNaN) ||
-      parts[0] === undefined ||
-      parts[1] === undefined ||
-      parts[2] === undefined
-    ) {
-      throw new Error(`Invalid SemVer format: '${v}' (expected X.Y.Z)`);
-    }
-    return [parts[0], parts[1], parts[2]];
-  };
-
-  const [maj1, min1, pat1] = parse(v1);
-  const [maj2, min2, pat2] = parse(v2);
+  const [maj1, min1, pat1] = parseSemver(v1);
+  const [maj2, min2, pat2] = parseSemver(v2);
 
   if (maj1 !== maj2) return maj1 - maj2;
   if (min1 !== min2) return min1 - min2;
@@ -385,31 +413,48 @@ export function compareSemver(v1: string, v2: string): number {
 
 /**
  * Evaluates whether an authorizer identifier or code possesses authority to approve department transfers.
- * Only the human Owner (OWNER_PRINCIPAL_ID) or active Executive leadership (e.g. EXEC-CEO) can authorize transfers.
+ * Only the human Owner (strictly OWNER_PRINCIPAL_ID) or active Executive leadership
+ * verified against trusted registry records (e.g. EXEC-CEO, EXEC-COO) can authorize transfers.
+ * Unconditional 'OWNER' strings, spoofed owner identities, and forged executive records are rejected.
  */
 export function isAuthorizedTransferAuthority(
   authorizerIdOrCode: string,
   agents: AgentRecord[] = CANONICAL_FOUNDING_AGENTS
 ): boolean {
+  // Strictly require the canonical Owner principal ID; reject any informal strings like 'OWNER' or names
   if (
     authorizerIdOrCode === OWNER_PRINCIPAL_ID ||
-    authorizerIdOrCode === 'OWNER' ||
     authorizerIdOrCode === CANONICAL_OWNER_PRINCIPAL.principalId
   ) {
     return true;
   }
+
+  // Authorizer must be found in the trusted workforce registry
   const authorizer = agents.find((a) => a.id === authorizerIdOrCode || a.agentCode === authorizerIdOrCode);
-  if (authorizer && authorizer.level === 'EXECUTIVE' && authorizer.operationalStatus === 'ACTIVE') {
+  if (!authorizer) {
+    return false;
+  }
+
+  // Ensure executive authorization uses trusted registry records with active status, Executive Office department, and permitted authority
+  if (
+    authorizer.level === 'EXECUTIVE' &&
+    authorizer.operationalStatus === 'ACTIVE' &&
+    authorizer.departmentId === 'executive_office' &&
+    authorizer.id === authorizer.identity?.id &&
+    authorizer.agentCode === authorizer.identity?.agentCode
+  ) {
     return true;
   }
+
   return false;
 }
 
 /**
  * Transfers an agent to a new corporate department.
  * Preserves the permanent immutable founding department origin in identity,
- * validates destination existence, verifies transfer authorization,
- * enforces monotonically increasing SemVer, and appends an immutable audit record to departmentTransferHistory.
+ * validates destination existence, verifies transfer authorization against trusted registry records,
+ * enforces strictly increasing timestamps, enforces monotonically increasing SemVer,
+ * and appends an immutable audit record to departmentTransferHistory.
  */
 export function transferAgentDepartment(
   record: AgentRecord,
@@ -439,7 +484,14 @@ export function transferAgentDepartment(
     throw new Error(`Cannot transfer agent ${record.agentCode} to same department '${fromDepartmentId}'`);
   }
 
-  // 3. Verify transfer authorization (Owner or Executive authority required)
+  // 3. Verify transfer authorization against trusted registry records
+  if (params.knownAgents) {
+    const registryCheck = validateOrganizationalRegistry(params.knownAgents, departments);
+    if (!registryCheck.valid) {
+      throw new Error(`Untrusted agent registry supplied: ${registryCheck.errors.join('; ')}`);
+    }
+  }
+
   if (!isAuthorizedTransferAuthority(params.authorizedBy, agents)) {
     throw new Error(
       `Unauthorized department transfer: '${params.authorizedBy}' lacks executive or Owner transfer authorization authority`
@@ -459,21 +511,42 @@ export function transferAgentDepartment(
     nextVersion = incrementMinorVersion(record.currentConfig.configVersion);
   }
 
-  // 5. Construct transfer record
+  // 5. Validate transfer timestamp: reject invalid dates and require strictly increasing timestamps
+  const effectiveDate = params.effectiveDate ?? new Date().toISOString();
+  const effectiveTime = new Date(effectiveDate).getTime();
+  if (isNaN(effectiveTime) || !effectiveDate.trim()) {
+    throw new Error(`Invalid transfer effectiveDate: '${effectiveDate}' is not a valid date string`);
+  }
+
+  const existingHistory = record.currentConfig.departmentTransferHistory ?? [];
+  if (existingHistory.length > 0) {
+    const lastTransfer = existingHistory[existingHistory.length - 1]!;
+    const lastTime = new Date(lastTransfer.effectiveDate).getTime();
+    if (isNaN(lastTime)) {
+      throw new Error(`Invalid previous transfer effectiveDate: '${lastTransfer.effectiveDate}'`);
+    }
+    if (effectiveTime <= lastTime) {
+      throw new Error(
+        `Transfer effectiveDate must be strictly increasing: '${effectiveDate}' must be strictly later than previous transfer date '${lastTransfer.effectiveDate}'`
+      );
+    }
+  }
+
+  // 6. Construct transfer record
   const transferRecord: DepartmentTransferRecord = Object.freeze({
     transferId: randomUUID(),
     fromDepartmentId,
     toDepartmentId: params.toDepartmentId,
-    effectiveDate: params.effectiveDate ?? new Date().toISOString(),
+    effectiveDate,
     reason: params.reason,
     authorizedBy: params.authorizedBy,
     previousConfigVersion: record.currentConfig.configVersion,
     newConfigVersion: nextVersion,
   });
 
-  // 6. Deep clone and freeze existing transfer history to prevent retrospective modification
-  const existingHistory = (record.currentConfig.departmentTransferHistory ?? []).map((t) => Object.freeze({ ...t }));
-  const updatedTransferHistory = Object.freeze([...existingHistory, transferRecord]);
+  // 7. Deep clone and freeze existing transfer history to prevent retrospective modification
+  const existingHistoryFrozen = existingHistory.map((t) => Object.freeze({ ...t }));
+  const updatedTransferHistory = Object.freeze([...existingHistoryFrozen, transferRecord]);
 
   const updatedConfig: AgentConfiguration = {
     ...record.currentConfig,
@@ -488,12 +561,12 @@ export function transferAgentDepartment(
     updatedAt: new Date().toISOString(),
   };
 
-  // 7. Retain immutable founding identity anchor: identity.departmentId is NEVER rewritten
+  // 8. Retain immutable founding identity anchor: identity.departmentId is NEVER rewritten
   return createAgentRecord(record.identity, updatedConfig, [...record.configHistory, record.currentConfig]);
 }
 
 /**
- * Validates the full chain-of-custody and historical continuity of an agent's department transfers.
+ * Validates the full chain-of-custody, timestamp monotonicity, and historical continuity of an agent's department transfers.
  */
 export function validateDepartmentTransferHistory(
   agent: AgentRecord,
@@ -520,6 +593,12 @@ export function validateDepartmentTransferHistory(
     );
   }
 
+  // Configuration version continuity validation against configHistory and active config
+  const knownConfigVersions = new Set<string>([
+    agent.currentConfig.configVersion,
+    ...agent.configHistory.map((c) => c.configVersion),
+  ]);
+
   for (let i = 0; i < history.length; i++) {
     const cur = history[i]!;
     if (!validDeptIds.has(cur.fromDepartmentId)) {
@@ -530,6 +609,24 @@ export function validateDepartmentTransferHistory(
     }
     if (cur.fromDepartmentId === cur.toDepartmentId) {
       errors.push(`Transfer history record ${i} on ${agent.agentCode} has identical from/to department: '${cur.fromDepartmentId}'`);
+    }
+
+    // Timestamp validity check
+    const curTime = new Date(cur.effectiveDate).getTime();
+    if (isNaN(curTime) || !cur.effectiveDate || !cur.effectiveDate.trim()) {
+      errors.push(`Transfer history record ${i} on ${agent.agentCode} has invalid effectiveDate: '${cur.effectiveDate}'`);
+    }
+
+    // Configuration version gap checks: transfer record versions must exist in the agent's known configuration versions
+    if (!knownConfigVersions.has(cur.previousConfigVersion)) {
+      errors.push(
+        `Configuration version gap on ${agent.agentCode}: transfer record ${i} previousConfigVersion '${cur.previousConfigVersion}' is not found in configuration history`
+      );
+    }
+    if (!knownConfigVersions.has(cur.newConfigVersion)) {
+      errors.push(
+        `Configuration version gap on ${agent.agentCode}: transfer record ${i} newConfigVersion '${cur.newConfigVersion}' is not found in configuration history or active config`
+      );
     }
 
     // Monotonic versioning check within record
@@ -555,22 +652,25 @@ export function validateDepartmentTransferHistory(
       try {
         if (compareSemver(cur.previousConfigVersion, prev.newConfigVersion) < 0) {
           errors.push(
-            `Transfer history version mismatch on ${agent.agentCode}: record ${i} previous version '${cur.previousConfigVersion}' is older than previous transfer result '${prev.newConfigVersion}'`
+            `Transfer history version regression on ${agent.agentCode}: record ${i} previous version '${cur.previousConfigVersion}' is older than previous transfer result '${prev.newConfigVersion}'`
           );
         }
       } catch (e: any) {
         errors.push(`Transfer history version error on ${agent.agentCode}: ${e.message}`);
       }
-      // Monotonic timestamps
-      if (new Date(cur.effectiveDate).getTime() < new Date(prev.effectiveDate).getTime()) {
-        errors.push(
-          `Transfer history timestamp regression on ${agent.agentCode}: record ${i} (${cur.effectiveDate}) precedes previous transfer (${prev.effectiveDate})`
-        );
+      // Strictly increasing timestamps: curTime must be strictly > prevTime (reject equal or earlier)
+      const prevTime = new Date(prev.effectiveDate).getTime();
+      if (!isNaN(curTime) && !isNaN(prevTime)) {
+        if (curTime <= prevTime) {
+          errors.push(
+            `Transfer history timestamp violation on ${agent.agentCode}: record ${i} (${cur.effectiveDate}) must be strictly later than previous transfer (${prev.effectiveDate})`
+          );
+        }
       }
     }
   }
 
-  // Final agreement: active department MUST match last transfer's toDepartmentId
+  // Final department agreement: active department MUST match last transfer's toDepartmentId
   const last = history[history.length - 1]!;
   if (agent.departmentId !== last.toDepartmentId) {
     errors.push(
@@ -578,23 +678,37 @@ export function validateDepartmentTransferHistory(
     );
   }
 
+  // Active configuration version agreement: active configVersion must not regress behind final transfer version
+  try {
+    if (compareSemver(agent.currentConfig.configVersion, last.newConfigVersion) < 0) {
+      errors.push(
+        `Active configuration version mismatch on ${agent.agentCode}: active configVersion '${agent.currentConfig.configVersion}' regresses behind final transfer version '${last.newConfigVersion}'`
+      );
+    }
+  } catch (e: any) {
+    errors.push(`Active configuration version error on ${agent.agentCode}: ${e.message}`);
+  }
+
+  // If active config version is different from the final transfer's newConfigVersion,
+  // the final transfer's newConfigVersion must be recorded in configHistory (no unexplained versions)
+  const configHistoryVersions = new Set(agent.configHistory.map((c) => c.configVersion));
+  if (agent.currentConfig.configVersion !== last.newConfigVersion && !configHistoryVersions.has(last.newConfigVersion)) {
+    errors.push(
+      `Active configuration version mismatch on ${agent.agentCode}: final transfer target version '${last.newConfigVersion}' is missing from both active config and configuration history`
+    );
+  }
+
   return { valid: errors.length === 0, errors };
 }
 
 function incrementMinorVersion(version: string): string {
-  const parts = version.split('.').map((p) => parseInt(p, 10));
-  if (parts.length === 3 && parts[0] !== undefined && parts[1] !== undefined && !parts.some(isNaN)) {
-    return `${parts[0]}.${parts[1] + 1}.0`;
-  }
-  return `${version}.1`;
+  const [maj, min] = parseSemver(version);
+  return `${maj}.${min + 1}.0`;
 }
 
 function incrementPatchVersion(version: string): string {
-  const parts = version.split('.').map((p) => parseInt(p, 10));
-  if (parts.length === 3 && parts[0] !== undefined && parts[1] !== undefined && parts[2] !== undefined && !parts.some(isNaN)) {
-    return `${parts[0]}.${parts[1]}.${parts[2] + 1}`;
-  }
-  return `${version}.1`;
+  const [maj, min, pat] = parseSemver(version);
+  return `${maj}.${min}.${pat + 1}`;
 }
 
 /**

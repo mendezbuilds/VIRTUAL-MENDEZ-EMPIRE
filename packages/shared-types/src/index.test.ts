@@ -16,6 +16,7 @@ import {
   updateAgentConfiguration,
   transferAgentDepartment,
   compareSemver,
+  parseSemver,
   isAuthorizedTransferAuthority,
   validateDepartmentTransferHistory,
   DepartmentTransferRecordSchema,
@@ -1152,11 +1153,275 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
   // 14. M2.1 Final Corrective Pass: Deep Verification of Transfers, Registry, Credentials, and Record Consistency
   // =========================================================================
   describe('14. M2.1 Final Corrective Pass: Deep Verification of Transfers, Registry, Credentials, and Record Consistency', () => {
-    // A. Department Transfer Integrity
-    it('14.1 Enforces complete department transfer integrity: destination existence, authorization verification, version monotonicity, and continuity', () => {
+    // 1. Authorization Integrity
+    it('14.1 Enforces strict transfer authorization integrity, rejecting spoofed Owner identifiers and forged executive records', () => {
+      const engineer = findAgentByCode('TECH-FSE')!;
+      const roster = cloneFoundingRoster();
+
+      // Spoofed Owner identifiers must be rejected
+      const spoofedOwnerIds = ['OWNER', 'owner', 'Stephen Mendez', 'owner_principal', randomUUID()];
+      for (const spoofed of spoofedOwnerIds) {
+        expect(isAuthorizedTransferAuthority(spoofed, roster)).toBe(false);
+        expect(() =>
+          transferAgentDepartment(engineer, {
+            toDepartmentId: 'opportunity_acquisition',
+            reason: 'Spoofed owner transfer attempt',
+            authorizedBy: spoofed,
+          })
+        ).toThrow('lacks executive or Owner transfer authorization authority');
+      }
+
+      // Canonical OWNER_PRINCIPAL_ID strictly succeeds
+      expect(isAuthorizedTransferAuthority(OWNER_PRINCIPAL_ID, roster)).toBe(true);
+      expect(isAuthorizedTransferAuthority(CANONICAL_OWNER_PRINCIPAL.principalId, roster)).toBe(true);
+
+      // Forged executive records must be rejected
+      expect(isAuthorizedTransferAuthority('EXEC-FORGED', roster)).toBe(false);
+      expect(isAuthorizedTransferAuthority(randomUUID(), roster)).toBe(false);
+
+      // Inactive executive (e.g. SUSPENDED) cannot authorize
+      const suspendedRoster = cloneFoundingRoster();
+      const suspendedCeo = suspendedRoster.find((a) => a.agentCode === 'EXEC-CEO')!;
+      suspendedCeo.currentConfig.operationalStatus = 'SUSPENDED';
+      expect(isAuthorizedTransferAuthority('EXEC-CEO', suspendedRoster)).toBe(false);
+
+      // Non-executive roles (Specialist, Director) cannot authorize
+      expect(isAuthorizedTransferAuthority('TECH-QA', roster)).toBe(false);
+      expect(isAuthorizedTransferAuthority('FIN-CFO', roster)).toBe(false);
+
+      // Active executive (EXEC-CEO, EXEC-COO) succeeds
+      expect(isAuthorizedTransferAuthority('EXEC-CEO', roster)).toBe(true);
+      expect(isAuthorizedTransferAuthority('EXEC-COO', roster)).toBe(true);
+
+      // Forged agent roster supplied to transferAgentDepartment is rejected via registry validation
+      const extraId = randomUUID();
+      const forgedRoster = [
+        ...roster,
+        createAgentRecord(
+          { id: extraId, agentCode: 'EXEC-ROGUE', departmentId: 'executive_office', createdAt: new Date().toISOString() },
+          { ...roster[0]!.currentConfig, configurationId: randomUUID(), agentId: extraId }
+        ),
+      ];
+      expect(() =>
+        transferAgentDepartment(engineer, {
+          toDepartmentId: 'opportunity_acquisition',
+          reason: 'Forged registry injection',
+          authorizedBy: 'EXEC-CEO',
+          knownAgents: forgedRoster as any,
+        })
+      ).toThrow('Untrusted agent registry supplied');
+    });
+
+    // 2. Strict SemVer Validation
+    it('14.2 Enforces strict SemVer 2.0 validation, rejecting malformed suffixes, negative values, leading zeros, and unsafe numeric values', () => {
+      // Positive tests: valid X.Y.Z SemVer strings
+      const validVersions = ['0.0.0', '1.0.0', '0.1.0', '0.0.1', '10.20.30', '999.888.777'];
+      for (const v of validVersions) {
+        expect(() => parseSemver(v)).not.toThrow();
+        expect(compareSemver(v, v)).toBe(0);
+      }
+      expect(compareSemver('1.2.0', '1.1.0')).toBeGreaterThan(0);
+      expect(compareSemver('1.1.0', '1.2.0')).toBeLessThan(0);
+      expect(compareSemver('2.0.0', '1.9.9')).toBeGreaterThan(0);
+
+      // Negative tests: malformed suffixes
+      const suffixVersions = ['1.0.0-beta', '1.0.0-alpha.1', '1.0.0+build2026', '1.0.0-rc1'];
+      for (const v of suffixVersions) {
+        expect(() => parseSemver(v)).toThrow('expected strict X.Y.Z');
+        expect(() => compareSemver(v, '1.0.0')).toThrow();
+      }
+
+      // Negative values
+      const negativeVersions = ['-1.0.0', '1.-1.0', '1.0.-1'];
+      for (const v of negativeVersions) {
+        expect(() => parseSemver(v)).toThrow('expected strict X.Y.Z');
+      }
+
+      // Leading zero numeric components where invalid
+      const leadingZeroVersions = ['01.0.0', '1.01.0', '1.0.01', '00.1.0'];
+      for (const v of leadingZeroVersions) {
+        expect(() => parseSemver(v)).toThrow('expected strict X.Y.Z');
+      }
+
+      // Truncated, extra segments, whitespace, prefixes
+      const malformedVersions = ['1', '1.0', '1.0.0.0', ' 1.0.0', '1.0.0 ', 'v1.0.0', 'V1.0.0', '1.0.x'];
+      for (const v of malformedVersions) {
+        expect(() => parseSemver(v)).toThrow('expected strict X.Y.Z');
+      }
+
+      // Unsafe numeric values
+      const unsafeVersion = '9007199254740992.0.0'; // > Number.MAX_SAFE_INTEGER
+      expect(() => parseSemver(unsafeVersion)).toThrow('exceeds safe integer limit');
+    });
+
+    // 3. Transfer Timestamps Validation
+    it('14.3 Enforces strictly increasing transfer timestamps and rejects invalid date strings', () => {
       const engineer = findAgentByCode('TECH-FSE')!;
 
-      // 1. Destination department existence check: invalid department must throw
+      // Invalid date strings must throw in transferAgentDepartment
+      expect(() =>
+        transferAgentDepartment(engineer, {
+          toDepartmentId: 'opportunity_acquisition',
+          reason: 'Invalid date transfer',
+          authorizedBy: 'EXEC-CEO',
+          effectiveDate: 'invalid-date-string',
+        })
+      ).toThrow("Invalid transfer effectiveDate: 'invalid-date-string' is not a valid date string");
+
+      expect(() =>
+        transferAgentDepartment(engineer, {
+          toDepartmentId: 'opportunity_acquisition',
+          reason: 'Empty date transfer',
+          authorizedBy: 'EXEC-CEO',
+          effectiveDate: '   ',
+        })
+      ).toThrow('is not a valid date string');
+
+      // Multi-step transfers: strictly increasing timestamps
+      const transfer1 = transferAgentDepartment(engineer, {
+        toDepartmentId: 'opportunity_acquisition',
+        reason: 'First rotation',
+        authorizedBy: 'EXEC-CEO',
+        effectiveDate: '2026-02-01T10:00:00.000Z',
+        newVersion: '1.1.0',
+      });
+
+      // Equal timestamp must throw
+      expect(() =>
+        transferAgentDepartment(transfer1, {
+          toDepartmentId: 'research_intelligence',
+          reason: 'Same time transfer',
+          authorizedBy: 'EXEC-CEO',
+          effectiveDate: '2026-02-01T10:00:00.000Z', // Equal timestamp
+          newVersion: '1.2.0',
+        })
+      ).toThrow('Transfer effectiveDate must be strictly increasing');
+
+      // Earlier timestamp must throw
+      expect(() =>
+        transferAgentDepartment(transfer1, {
+          toDepartmentId: 'research_intelligence',
+          reason: 'Earlier time transfer',
+          authorizedBy: 'EXEC-CEO',
+          effectiveDate: '2026-01-15T00:00:00.000Z', // Earlier timestamp
+          newVersion: '1.2.0',
+        })
+      ).toThrow('Transfer effectiveDate must be strictly increasing');
+
+      // Strictly later timestamp succeeds
+      const transfer2 = transferAgentDepartment(transfer1, {
+        toDepartmentId: 'research_intelligence',
+        reason: 'Second rotation',
+        authorizedBy: 'EXEC-CEO',
+        effectiveDate: '2026-03-01T12:00:00.000Z', // Later timestamp
+        newVersion: '1.2.0',
+      });
+      expect(validateDepartmentTransferHistory(transfer2).valid).toBe(true);
+
+      // validateDepartmentTransferHistory rejects history with equal timestamps or invalid dates
+      const equalTimeConfig = {
+        ...transfer2.currentConfig,
+        departmentTransferHistory: [
+          transfer2.departmentTransferHistory[0]!,
+          {
+            ...transfer2.departmentTransferHistory[1]!,
+            effectiveDate: transfer2.departmentTransferHistory[0]!.effectiveDate, // Equal
+          },
+        ],
+      };
+      const equalTimeAgent = createAgentRecord(transfer2.identity, equalTimeConfig, transfer2.configHistory);
+      const equalCheck = validateDepartmentTransferHistory(equalTimeAgent);
+      expect(equalCheck.valid).toBe(false);
+      expect(equalCheck.errors.some((e) => e.includes('Transfer history timestamp violation'))).toBe(true);
+
+      const invalidDateConfig = {
+        ...transfer2.currentConfig,
+        departmentTransferHistory: [
+          {
+            ...transfer2.departmentTransferHistory[0]!,
+            effectiveDate: 'not-a-valid-date',
+          },
+          transfer2.departmentTransferHistory[1]!,
+        ],
+      };
+      const invalidDateAgent = createAgentRecord(transfer2.identity, invalidDateConfig, transfer2.configHistory);
+      const invalidDateCheck = validateDepartmentTransferHistory(invalidDateAgent);
+      expect(invalidDateCheck.valid).toBe(false);
+      expect(invalidDateCheck.errors.some((e) => e.includes('has invalid effectiveDate'))).toBe(true);
+    });
+
+    // 4. Configuration Version Continuity Validation
+    it('14.4 Enforces configuration version continuity, rejecting version gaps, regressions, and active-configuration mismatches', () => {
+      const engineer = findAgentByCode('TECH-FSE')!;
+
+      const transfer1 = transferAgentDepartment(engineer, {
+        toDepartmentId: 'opportunity_acquisition',
+        reason: 'Rotation 1',
+        authorizedBy: 'EXEC-CEO',
+        newVersion: '1.1.0',
+        effectiveDate: '2026-02-01T00:00:00.000Z',
+      });
+
+      const transfer2 = transferAgentDepartment(transfer1, {
+        toDepartmentId: 'research_intelligence',
+        reason: 'Rotation 2',
+        authorizedBy: OWNER_PRINCIPAL_ID,
+        newVersion: '1.2.0',
+        effectiveDate: '2026-03-01T00:00:00.000Z',
+      });
+
+      expect(validateDepartmentTransferHistory(transfer2).valid).toBe(true);
+
+      // 1. Version Gap: transfer record specifies a version not present in configuration history
+      const versionGapConfig = {
+        ...transfer2.currentConfig,
+        departmentTransferHistory: [
+          transfer2.departmentTransferHistory[0]!,
+          {
+            ...transfer2.departmentTransferHistory[1]!,
+            previousConfigVersion: '3.0.0', // Gap: 3.0.0 was never in config history
+            newConfigVersion: '3.1.0',
+          },
+        ],
+      };
+      const versionGapAgent = createAgentRecord(transfer2.identity, versionGapConfig, transfer2.configHistory);
+      const gapCheck = validateDepartmentTransferHistory(versionGapAgent);
+      expect(gapCheck.valid).toBe(false);
+      expect(gapCheck.errors.some((e) => e.includes('Configuration version gap'))).toBe(true);
+
+      // 2. Version Regression in transfer history: record 1 previousConfigVersion is older than record 0 newConfigVersion
+      const versionRegressionConfig = {
+        ...transfer2.currentConfig,
+        departmentTransferHistory: [
+          transfer2.departmentTransferHistory[0]!, // 1.0.0 -> 1.1.0
+          {
+            ...transfer2.departmentTransferHistory[1]!,
+            previousConfigVersion: '1.0.0', // Regression: regresses back behind 1.1.0
+            newConfigVersion: '1.1.0',
+          },
+        ],
+      };
+      const versionRegressionAgent = createAgentRecord(transfer2.identity, versionRegressionConfig, transfer2.configHistory);
+      const regCheck = validateDepartmentTransferHistory(versionRegressionAgent);
+      expect(regCheck.valid).toBe(false);
+      expect(regCheck.errors.some((e) => e.includes('Transfer history version regression'))).toBe(true);
+
+      // 3. Active Configuration Mismatch: currentConfig.configVersion is older than final transfer version
+      const activeMismatchConfig = {
+        ...transfer2.currentConfig,
+        configVersion: '1.0.0', // Active config is 1.0.0 but final transfer was 1.2.0
+      };
+      const activeMismatchAgent = createAgentRecord(transfer2.identity, activeMismatchConfig, transfer2.configHistory);
+      const mismatchCheck = validateDepartmentTransferHistory(activeMismatchAgent);
+      expect(mismatchCheck.valid).toBe(false);
+      expect(mismatchCheck.errors.some((e) => e.includes('Active configuration version mismatch'))).toBe(true);
+    });
+
+    // 5. Transfer Continuity and Frozen Records
+    it('14.5 Enforces department existence, chain continuity, and non-retrospective modification of frozen transfer records', () => {
+      const engineer = findAgentByCode('TECH-FSE')!;
+
+      // Destination department existence check: invalid department must throw
       expect(() =>
         transferAgentDepartment(engineer, {
           toDepartmentId: 'non_existent_dept' as any,
@@ -1165,36 +1430,7 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
         })
       ).toThrow("Unknown destination department 'non_existent_dept'");
 
-      // 2. Transfer authorization check: non-executive / non-owner caller must throw
-      expect(() =>
-        transferAgentDepartment(engineer, {
-          toDepartmentId: 'opportunity_acquisition',
-          reason: 'Unauthorized specialist transfer',
-          authorizedBy: 'TECH-QA', // Specialist lacks transfer authorization authority
-        })
-      ).toThrow("Unauthorized department transfer: 'TECH-QA' lacks executive or Owner transfer authorization authority");
-
-      // 3. Monotonic SemVer versioning: non-increasing version must throw
-      expect(() =>
-        transferAgentDepartment(engineer, {
-          toDepartmentId: 'opportunity_acquisition',
-          reason: 'Regressive version transfer',
-          authorizedBy: 'EXEC-CEO',
-          newVersion: '1.0.0', // <= current version 1.0.0
-        })
-      ).toThrow("Invalid version transition: new version '1.0.0' must be strictly greater than current version '1.0.0'");
-
-      // Invalid SemVer string format must throw
-      expect(() =>
-        transferAgentDepartment(engineer, {
-          toDepartmentId: 'opportunity_acquisition',
-          reason: 'Malformed version transfer',
-          authorizedBy: 'EXEC-CEO',
-          newVersion: 'v2-beta',
-        })
-      ).toThrow("Invalid SemVer format: 'v2-beta'");
-
-      // 4. Multi-step valid transfer continuity
+      // Multi-step valid transfer continuity
       const transfer1 = transferAgentDepartment(engineer, {
         toDepartmentId: 'opportunity_acquisition',
         reason: 'Rotate to opportunity scouting',
@@ -1206,29 +1442,23 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
       const transfer2 = transferAgentDepartment(transfer1, {
         toDepartmentId: 'research_intelligence',
         reason: 'Rotate to technology research',
-        authorizedBy: OWNER_PRINCIPAL_ID, // Owner authorized
+        authorizedBy: OWNER_PRINCIPAL_ID,
         newVersion: '1.2.0',
         effectiveDate: '2026-03-01T00:00:00.000Z',
       });
 
-      // Transfer history continuity passes validation
-      const continuityResult = validateDepartmentTransferHistory(transfer2);
-      expect(continuityResult.valid).toBe(true);
-      expect(continuityResult.errors).toEqual([]);
-
-      // 5. Final transfer record agreement
       expect(transfer2.departmentId).toBe('research_intelligence');
       expect(transfer2.originDepartmentId).toBe('technology_engineering');
       expect(transfer2.departmentTransferHistory).toHaveLength(2);
 
-      // 6. Transfer continuity violation detection: artificial discontinuity between step 1 and step 2
+      // Discontinuity between step 1 and step 2
       const brokenConfig = {
         ...transfer2.currentConfig,
         departmentTransferHistory: [
           transfer2.departmentTransferHistory[0]!,
           {
             ...transfer2.departmentTransferHistory[1]!,
-            fromDepartmentId: 'business_development' as const, // Discontinuity: expected 'opportunity_acquisition'
+            fromDepartmentId: 'business_development' as const, // Expected 'opportunity_acquisition'
           },
         ],
       };
@@ -1237,12 +1467,12 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
       expect(brokenCheck.valid).toBe(false);
       expect(brokenCheck.errors.some((e) => e.includes('Transfer history discontinuity'))).toBe(true);
 
-      // 7. Retrospective modification prevention: transfer records are frozen
+      // Retrospective modification prevention: transfer records are frozen
       expect(Object.isFrozen(transfer2.departmentTransferHistory[0])).toBe(true);
     });
 
-    // B. Organizational Registry Integrity
-    it('14.2 Enforces exact 30-agent workforce roster size and 9 canonical corporate departments in registry validation', () => {
+    // 6. Workforce Roster Size and Department Counts Explicit Enforcement
+    it('14.6 Enforces exact 30-agent workforce roster size and 9 canonical corporate departments in registry validation', () => {
       const fullRoster = cloneFoundingRoster();
       expect(validateOrganizationalRegistry(fullRoster).valid).toBe(true);
 
@@ -1280,8 +1510,8 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
       expect(incompleteDeptCheck.errors.some((e) => e.includes('Department count mismatch: expected exactly 9'))).toBe(true);
     });
 
-    // B. Owner Reporting Consistency & Restriction to EXEC-CEO
-    it('14.3 Enforces strict Owner reporting consistency and restricts direct Owner reporting exclusively to EXEC-CEO', () => {
+    // 7. Owner Reporting Consistency & Restriction to EXEC-CEO
+    it('14.7 Enforces strict Owner reporting consistency and restricts direct Owner reporting exclusively to EXEC-CEO', () => {
       const roster = cloneFoundingRoster();
 
       // 1. Non-CEO Executive (e.g. Chief Operating Officer) attempting to report to Owner is rejected
@@ -1324,8 +1554,8 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
       expect(illegalOwnerPrincipalRef.errors.some((e) => e.includes('non-Owner reporting agent cannot specify ownerPrincipalId'))).toBe(true);
     });
 
-    // C. Credential Security & Strict Schemas
-    it('14.4 Enforces expanded credential property detection, schema strictness, cycle-safety, and resolution boundary', () => {
+    // 8. Credential Security & Strict Schemas
+    it('14.8 Enforces expanded credential property detection, schema strictness, cycle-safety, and resolution boundary', () => {
       // 1. Expanded sensitive property detection (secret, clientSecret, token, refreshToken, authorization, auth, etc.)
       const sensitiveKeys = [
         'secret',
@@ -1400,8 +1630,8 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
       expect(CredentialResolverContextSchema.safeParse(resolverRequest).success).toBe(true);
     });
 
-    // D. Agent Record Consistency
-    it('14.5 Enforces agent record internal consistency and specialist-supervisor department alignment', () => {
+    // 9. Agent Record Consistency
+    it('14.9 Enforces agent record internal consistency and specialist-supervisor department alignment', () => {
       const roster = cloneFoundingRoster();
 
       // 1. Identity ID mismatch in createAgentRecord
