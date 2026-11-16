@@ -65,11 +65,11 @@
 
 ---
 
-## ADR-007: Corporate Department Hierarchy & 22-Agent Workforce
-- **Status:** APPROVED
+## ADR-007: Corporate Department Hierarchy & Initial Prototype Workforce
+- **Status:** SUPERSEDED BY ADR-010
 - **Context:** The virtual company requires a real corporate structure with 9 departments, executive leadership, and functional specializations.
-- **Decision:** Established 9 distinct departments with designated Directors and 22 initial specialized AI agents. Enforced hierarchical delegation rules where superiors delegate to subordinates, and cross-department requests require Director-level authority.
-- **Consequences:** Eliminates chaotic uncoordinated agent meshes; establishes clear chains of command, accountability, and departmental budget controls.
+- **Decision:** Established 9 distinct departments with designated Directors and an initial prototype workforce.
+- **Consequences:** Paved the way for formalization into the canonical 30-agent workforce.
 
 ---
 
@@ -89,3 +89,15 @@
 - **Context:** While the workforce must operate independently, the Owner remains the ultimate authority. Consequential actions (outreach emails, legal contracts, live trades) must never be sent without Owner sign-off.
 - **Decision:** The Autonomy Engine and Delegation Manager automatically intercept any task flagged as consequential (`EXTERNAL_OUTREACH`, `LIVE_TRADING`, `CAPITAL_TRANSFER`, `BINDING_CONTRACT`), transition its state to `WAITING_FEEDBACK`, and register an explicit authorization request in the Owner queue.
 - **Consequences:** Guarantees Owner safety and total governance compliance with zero chance of autonomous rogue communications.
+
+---
+
+## ADR-010: Canonical 30-Agent Workforce, Authority Boundaries & Communication Protocol (Milestone 2.1)
+- **Status:** APPROVED (Milestone 2.1 Implementation Directive)
+- **Context:** Milestone 2.1 establishes the common data contracts and type system underpinning the entire Virtual MENDEZ EMPIRE workforce across 9 corporate departments, expanding from the preliminary 22-agent prototype to the approved target of 30 logical AI employees.
+- **Decision:**
+  1. Define 30 founding AI employee identities in `@vme/shared-types` (`agent-identity.ts`) across 9 canonical departments, each with immutable UUID, unique uppercase agent code (`DEPT-ROLE`), display name, job title, organizational level, reporting supervisor, assigned responsibilities, required capabilities, permission profile, and versioned configuration.
+  2. Enforce strict seniority ranking (`OWNER: 0, EXECUTIVE: 1, DIRECTOR: 2, MANAGER: 3, SPECIALIST: 4, OPERATOR: 5`) and automated cycle detection to guarantee acyclic hierarchical trees.
+  3. Classify restricted actions (`EXTERNAL_COMMUNICATION`, `JOB_APPLICATION_SUBMISSION`, `BINDING_CONTRACT_ACCEPTANCE`, `CAPITAL_TRANSFER`, `LIVE_TRADING_EXECUTION`, `SPENDING_EXCEEDING_LIMIT`, `GOVERNANCE_OVERRIDE`, `EMERGENCY_SHUTDOWN_OVERRIDE`, `PERMISSION_ELEVATION`) and prohibit autonomous execution without verified Owner authorization.
+  4. Standardize communication envelopes supporting 14 canonical message categories with sender verification against trusted execution context to bar impersonation.
+- **Consequences:** Canonical type definitions and runtime validation schemas in `@vme/shared-types` serve as the immutable single source of truth for all subsequent Phase 2 milestones.

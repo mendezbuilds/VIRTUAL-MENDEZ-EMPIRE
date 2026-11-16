@@ -1,18 +1,16 @@
 import { z } from 'zod';
+import { DepartmentIdSchema } from './organization.js';
 
-export const DepartmentIdSchema = z.enum([
-  'executive_office',
-  'financial_intelligence',
-  'technology_engineering',
-  'business_development',
-  'marketing_growth',
-  'operations_administration',
-  'opportunity_acquisition',
-  'research_intelligence',
-  'security_governance',
-]);
-
-export type DepartmentId = z.infer<typeof DepartmentIdSchema>;
+export {
+  DepartmentIdSchema,
+  type DepartmentId,
+  DepartmentSchema,
+  type Department,
+  OrganizationalLevelSchema,
+  type OrganizationalLevel,
+  ORGANIZATIONAL_LEVEL_RANKS,
+  CANONICAL_DEPARTMENTS,
+} from './organization.js';
 
 export const RoleTierSchema = z.enum([
   'executive',
@@ -23,20 +21,6 @@ export const RoleTierSchema = z.enum([
 ]);
 
 export type RoleTier = z.infer<typeof RoleTierSchema>;
-
-export const DepartmentSchema = z.object({
-  id: DepartmentIdSchema,
-  name: z.string(),
-  description: z.string(),
-  directorId: z.string().uuid().optional(),
-  budgetMonthlyUsd: z.number().nonnegative(),
-  allowedCapabilities: z.array(z.string()),
-  parentDepartmentId: DepartmentIdSchema.optional(),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-});
-
-export type Department = z.infer<typeof DepartmentSchema>;
 
 export const EmployeeRoleSchema = z.object({
   id: z.string().uuid(),
@@ -50,4 +34,3 @@ export const EmployeeRoleSchema = z.object({
 });
 
 export type EmployeeRole = z.infer<typeof EmployeeRoleSchema>;
-

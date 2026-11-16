@@ -68,3 +68,4 @@ export class SemanticMemory {
     return this.storage.search(queryVector, limit, minSimilarity);
   }
 }
+

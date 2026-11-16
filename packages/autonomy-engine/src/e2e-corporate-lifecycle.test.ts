@@ -121,3 +121,4 @@ describe('VIRTUAL MENDEZ EMPIRE — End-to-End Corporate Lifecycle (Phase 2)', (
     expect(oppBudget.burnRatePercentage).toBe(0.25);
   });
 });
+

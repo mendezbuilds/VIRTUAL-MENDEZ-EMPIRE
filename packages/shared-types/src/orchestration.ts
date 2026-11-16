@@ -1,5 +1,18 @@
 import { z } from 'zod';
 import { DepartmentIdSchema, RoleTierSchema } from './departments.js';
+import {
+  TaskPrioritySchema,
+  TaskStatusSchema,
+  type TaskPriority,
+  type TaskStatus,
+} from './task-management.js';
+
+export {
+  TaskPrioritySchema,
+  type TaskPriority,
+  TaskStatusSchema,
+  type TaskStatus,
+} from './task-management.js';
 
 export const AgentSpecSchema = z.object({
   id: z.string().uuid(),
@@ -17,20 +30,6 @@ export const AgentSpecSchema = z.object({
 });
 
 export type AgentSpec = z.infer<typeof AgentSpecSchema>;
-
-export const TaskPrioritySchema = z.enum(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']);
-export type TaskPriority = z.infer<typeof TaskPrioritySchema>;
-
-export const TaskStatusSchema = z.enum([
-  'PENDING',
-  'ASSIGNED',
-  'IN_PROGRESS',
-  'WAITING_FEEDBACK',
-  'COMPLETED',
-  'FAILED',
-  'CANCELLED',
-]);
-export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 
 export const OrchestratedTaskSchema = z.object({
   id: z.string().uuid(),
@@ -84,4 +83,3 @@ export const LLMCompletionResponseSchema = z.object({
 });
 
 export type LLMCompletionResponse = z.infer<typeof LLMCompletionResponseSchema>;
-

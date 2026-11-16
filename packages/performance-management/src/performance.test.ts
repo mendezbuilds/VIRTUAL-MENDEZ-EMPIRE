@@ -98,3 +98,4 @@ describe('@vme/performance-management Corporate KPIs & Budget Oversight', () => 
     expect(tracker.isWithinBudget('financial_intelligence', 40000)).toBe(false);
   });
 });
+

@@ -60,3 +60,4 @@ export const DepartmentBudgetReportSchema = z.object({
 });
 
 export type DepartmentBudgetReport = z.infer<typeof DepartmentBudgetReportSchema>;
+

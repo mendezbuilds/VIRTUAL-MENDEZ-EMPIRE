@@ -107,3 +107,4 @@ describe('@vme/agent-memory Tri-Tier Persistent Memory Engine', () => {
     expect(results[1]?.similarity).toBeLessThan(0.3);
   });
 });
+

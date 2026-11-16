@@ -112,3 +112,4 @@ describe('@vme/autonomy-engine Empire Autonomy Engine', () => {
     ).rejects.toThrow(EmergencyHaltError);
   });
 });
+

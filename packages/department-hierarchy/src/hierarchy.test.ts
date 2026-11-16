@@ -38,9 +38,9 @@ describe('@vme/department-hierarchy Corporate Structure & Workforce', () => {
     }
   });
 
-  it('verifies the corporate workforce roster contains 22 specialized AI agents', () => {
+  it('verifies the corporate workforce roster contains 30 specialized AI agents', () => {
     const agents = registry.getAllAgents();
-    expect(agents).toHaveLength(22);
+    expect(agents).toHaveLength(30);
   });
 
   it('enforces corporate delegation rules across seniority and department boundaries', () => {
@@ -79,3 +79,4 @@ describe('@vme/department-hierarchy Corporate Structure & Workforce', () => {
     );
   });
 });
+

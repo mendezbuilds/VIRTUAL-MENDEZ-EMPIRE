@@ -123,3 +123,4 @@ export class AutonomyCoordinator {
     return this.activeObjectives;
   }
 }
+

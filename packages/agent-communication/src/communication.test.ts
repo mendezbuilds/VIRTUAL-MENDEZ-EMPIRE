@@ -95,3 +95,4 @@ describe('@vme/agent-communication Corporate Delegation & Messaging', () => {
     expect(pendingList[0]?.actionType).toBe('EXTERNAL_OUTREACH');
   });
 });
+

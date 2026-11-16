@@ -41,3 +41,4 @@ export class WorkingMemory {
     this.scratchpads.delete(taskId);
   }
 }
+

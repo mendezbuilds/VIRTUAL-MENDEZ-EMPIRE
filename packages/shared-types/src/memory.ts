@@ -27,3 +27,4 @@ export const SemanticKnowledgeItemSchema = z.object({
 });
 
 export type SemanticKnowledgeItem = z.infer<typeof SemanticKnowledgeItemSchema>;
+

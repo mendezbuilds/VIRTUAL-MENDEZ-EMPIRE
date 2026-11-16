@@ -39,3 +39,4 @@ export class BudgetTracker {
     return currentSpent + additionalExpenseUsd <= dept.budgetMonthlyUsd;
   }
 }
+

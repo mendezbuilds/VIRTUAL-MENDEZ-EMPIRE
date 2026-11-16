@@ -22,19 +22,56 @@ The Virtual Mendez Empire (VME) is a fully autonomous, AI-operated corporate ope
 
 ## 2. Organizational Hierarchy & Departments
 
-VME establishes nine foundational departments:
+VME establishes nine foundational departments staffed by 30 canonical AI employees:
 
-1. **Executive Office:** Strategic objective decomposition, company-wide governance, board reports, Owner alignment.
-2. **Financial Intelligence:** Central treasury, double-entry accounting, budget allocation, risk management, FX & Crypto research/paper trading divisions.
-3. **Technology & Engineering:** Software engineering, architecture, code reviews, automated CI/CD, agent tooling.
-4. **Business Development:** Enterprise partnership sourcing, B2B deal discovery, subsidiary incubation.
-5. **Marketing & Growth:** Audience acquisition, content distribution, brand intelligence.
-6. **Operations & Administration:** Workflow coordination, compliance auditing, operational monitoring.
-7. **Opportunity Acquisition:** Dual-track acquisition engine:
+1. **Executive Office (2 agents):** Strategic objective decomposition, company-wide governance, board reports, Owner alignment.
+   - `EXEC-CEO`: CEO & Autonomous Director (Executive)
+   - `EXEC-COO`: Chief Operating Officer (Executive)
+2. **Financial Intelligence (4 agents):** Central treasury, immutable double-entry accounting, budget allocation, risk management, FX & Crypto research/paper trading divisions.
+   - `FIN-CFO`: Chief Financial Director (Director)
+   - `FIN-ACC`: Lead Treasury & Ledger Accountant (Specialist)
+   - `FIN-FXA`: Foreign Exchange & Macro Paper Trading Analyst (Specialist)
+   - `FIN-CRY`: Crypto & DeFi Risk Analyst (Specialist)
+3. **Technology & Engineering (5 agents):** Software engineering, architecture, code reviews, automated CI/CD, agent tooling and platform reliability.
+   - `TECH-CTO`: Chief Technology Director (Director)
+   - `TECH-ARCH`: Lead Software Architect (Specialist)
+   - `TECH-FSE`: Senior Full Stack Engineer (Specialist)
+   - `TECH-DEVOPS`: DevOps & Platform Reliability Engineer (Specialist)
+   - `TECH-QA`: QA & Systems Verification Specialist (Specialist)
+4. **Business Development (3 agents):** Enterprise partnership sourcing, B2B deal discovery, commercial proposals, subsidiary incubation.
+   - `BIZ-DIR`: Director of Business Development (Director)
+   - `BIZ-PART`: Strategic Partnership Sourcing Specialist (Specialist)
+   - `BIZ-PROP`: B2B Deal Structuring & Proposal Specialist (Specialist)
+5. **Marketing & Growth (3 agents):** Audience acquisition, content distribution, social channels, brand intelligence.
+   - `MKT-DIR`: Director of Marketing & Growth (Director)
+   - `MKT-CONT`: Content Strategist & Copywriter (Specialist)
+   - `MKT-SOC`: Social Media & Omnichannel Distribution Specialist (Specialist)
+6. **Operations & Administration (3 agents):** Workflow coordination, background cron automations, compliance auditing, operational monitoring.
+   - `OPS-DIR`: Director of Operations & Administration (Director)
+   - `OPS-COORD`: Workflow Orchestration & Scheduling Coordinator (Specialist)
+   - `OPS-COMP`: Compliance & Operational Process Auditor (Specialist)
+7. **Opportunity Acquisition (4 agents):** Dual-track acquisition engine:
    - *Track A (Owner Opportunities):* Remote engineering, Web3, AI contracts, job leads, automated outreach drafting.
    - *Track B (Empire Opportunities):* Bounties, commercial client leads, grants, startup consulting.
-8. **Research & Intelligence:** Competitive analysis, market forecasting, sentiment tracking, tokenomics.
-9. **Security & Governance:** Cryptographic credential vault, RBAC/ABAC enforcement, multi-tier kill switches, audit logs.
+   - `OPP-DIR`: Director of Opportunity Acquisition (Director)
+   - `OPP-SCOUT`: Owner Career & Job Scout Specialist (Specialist)
+   - `OPP-OUTR`: Owner Outreach & Application Preparer (Specialist)
+   - `OPP-LEAD`: Enterprise Lead Generation Specialist (Specialist)
+8. **Research & Intelligence (3 agents):** Deep market analysis, macro forecasting, competitive benchmarking, tokenomics.
+   - `RES-DIR`: Director of Research & Intelligence (Director)
+   - `RES-FORE`: Macroeconomic & Market Trend Forecaster (Specialist)
+   - `RES-COMP`: Competitive Intelligence & Tokenomics Analyst (Specialist)
+9. **Security & Governance (3 agents):** Cryptographic credential vault, RBAC/ABAC enforcement, multi-tier kill switches, audit logs.
+   - `SEC-CISO`: Chief Information Security Officer (Director)
+   - `SEC-IAM`: Identity, Access & Vault Governance Sentinel (Specialist)
+   - `SEC-AUD`: Security Audit Trail & Incident Sentinel (Specialist)
+
+### 2.1 Corporate Authority & Governance Perimeter
+- **Owner Authority:** Strategic directives, capital allocation approval, consequential action authorization, governance overrides, emergency shutdown and recovery authorization.
+- **Executive Authority:** Department coordination, objective decomposition, internal task assignment, delegation within authorized boundaries.
+- **Department Director Authority:** Department task allocation, specialist supervision, department reporting, authorized resource requests.
+- **Specialist Authority:** Execution within assigned responsibilities, internal communication, progress reporting.
+- **Critical Invariant:** No agent can grant itself additional permissions. Live financial trades, capital transfers, external emails, and contracts strictly require Owner authorization.
 
 ---
 
