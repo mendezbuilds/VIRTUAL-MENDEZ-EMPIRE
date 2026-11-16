@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@vme/shared-types": "workspace:*",
+    "@vme/security-governance": "workspace:*",
     "zod": "^3.24.2"
   },
   "devDependencies": {

@@ -1,14 +1,17 @@
+import { randomUUID } from 'node:crypto';
 import type {
   OrchestratedTask,
   StrategicObjective,
   AgentSpec,
+  AgentRecord,
 } from '@vme/shared-types';
 import type { DepartmentRegistry } from '@vme/department-hierarchy';
 import type { AgentRegistry } from '@vme/orchestrator';
-import type { EpisodicMemory } from '@vme/agent-memory';
+import type { EpisodicMemory, WorkingMemory } from '@vme/agent-memory';
 import type { DelegationManager } from '@vme/agent-communication';
 import type { EmergencySupervisor } from '@vme/security-governance';
 import { ObjectiveDecomposer, type RawObjectiveDirective } from './objective-decomposer.js';
+import type { ToolExecutionRuntime } from './tool-runtime.js';
 
 export interface ExecutionResult {
   objective: StrategicObjective;
@@ -16,24 +19,44 @@ export interface ExecutionResult {
   quarantinedForOwner: OrchestratedTask[];
 }
 
+export interface AutonomyCoordinatorOptions {
+  workingMemory?: WorkingMemory;
+  toolRuntime?: ToolExecutionRuntime;
+  emergencySupervisor?: EmergencySupervisor;
+}
+
 export class AutonomyCoordinator {
   private decomposer = new ObjectiveDecomposer();
   private activeObjectives: StrategicObjective[] = [];
   private taskStore = new Map<string, OrchestratedTask>();
+  private completedTasksList: OrchestratedTask[] = [];
+
+  private readonly workingMemory?: WorkingMemory;
+  private readonly toolRuntime?: ToolExecutionRuntime;
+  private readonly emergencySupervisor?: EmergencySupervisor;
 
   constructor(
     private readonly hierarchy: DepartmentRegistry,
     private readonly orchestratorRegistry: AgentRegistry,
     private readonly episodicMemory: EpisodicMemory,
     private readonly delegationManager: DelegationManager,
-    private readonly emergencySupervisor?: EmergencySupervisor
-  ) {}
+    optionsOrSupervisor?: EmergencySupervisor | AutonomyCoordinatorOptions
+  ) {
+    if (optionsOrSupervisor && 'assertOperational' in optionsOrSupervisor) {
+      this.emergencySupervisor = optionsOrSupervisor;
+    } else if (optionsOrSupervisor) {
+      const opts = optionsOrSupervisor as AutonomyCoordinatorOptions;
+      this.workingMemory = opts.workingMemory;
+      this.toolRuntime = opts.toolRuntime;
+      this.emergencySupervisor = opts.emergencySupervisor;
+    }
+  }
 
   async executeDirective(
     directive: RawObjectiveDirective,
     tenantId: string
   ): Promise<ExecutionResult> {
-    // 1. Assert operational state (Tier 1 & Tier 3 kill switch barrier)
+    // 1. Assert operational state (Tier 1 & Tier 3 circuit breaker)
     if (this.emergencySupervisor) {
       this.emergencySupervisor.assertOperational();
     }
@@ -49,14 +72,13 @@ export class AutonomyCoordinator {
     for (const task of executableTasks) {
       this.taskStore.set(task.id, task);
 
-      // Check Owner Authorization Boundary
+      // Check Owner Authorization Boundaries for Consequential Actions
       const isConsequential =
         task.title.toLowerCase().includes('outreach') ||
         task.title.toLowerCase().includes('trade') ||
         Boolean(task.inputData['requiresApproval']);
 
       if (isConsequential && task.title.toLowerCase().includes('outreach')) {
-        // Find specialist in target department
         const specialist = this.findAgentForTask(task);
         if (specialist) {
           this.delegationManager.interceptConsequentialAction(
@@ -84,21 +106,41 @@ export class AutonomyCoordinator {
         continue;
       }
 
+      // Initialize working memory scratchpad for task
+      if (this.workingMemory) {
+        this.workingMemory.set(task.id, 'taskTitle', task.title);
+        this.workingMemory.set(task.id, 'status', 'IN_PROGRESS');
+      }
+
       // Execute task through AI Orchestration model gateway
       const executed = await this.orchestratorRegistry.executeTask(targetAgent.id, task);
       this.taskStore.set(executed.id, executed);
       completedTasks.push(executed);
+      this.completedTasksList.push(executed);
 
-      // Store in Episodic institutional memory
+      if (this.workingMemory) {
+        this.workingMemory.set(task.id, 'status', 'COMPLETED');
+        this.workingMemory.set(task.id, 'output', executed.outputResult);
+      }
+
+      // Store in Episodic institutional memory with full schema adherence
+      const agentRec = this.hierarchy.getAgentRecord(targetAgent.id);
       await this.episodicMemory.recordExecution({
-        id: executed.id,
+        id: randomUUID(),
         agentId: targetAgent.id,
+        agentCode: agentRec?.agentCode,
         departmentId: targetAgent.departmentId,
         taskId: executed.id,
         actionType: 'AUTONOMOUS_TASK_EXECUTION',
         inputSummary: `${executed.title}: ${executed.description}`,
         decisionRationale: `Executed autonomously per strategic objective ${objective.title}`,
         outcome: (executed.outputResult?.['summary'] as string) ?? 'Execution successful',
+        status: 'SUCCESS',
+        scope: 'DEPARTMENT_SCOPED',
+        importanceScore: 7,
+        metadata: {
+          initiativeTitle: objective.title,
+        },
         recordedAt: new Date().toISOString(),
       });
     }
@@ -110,7 +152,7 @@ export class AutonomyCoordinator {
     };
   }
 
-  private findAgentForTask(task: OrchestratedTask): AgentSpec | null {
+  private findAgentForTask(task: { departmentId: any }): AgentSpec | null {
     const agents = this.hierarchy.listAgentsByDepartment(task.departmentId);
     if (agents.length === 0) return null;
 
@@ -122,5 +164,12 @@ export class AutonomyCoordinator {
   getActiveObjectives(): StrategicObjective[] {
     return this.activeObjectives;
   }
-}
 
+  getCompletedTasks(): OrchestratedTask[] {
+    return [...this.completedTasksList];
+  }
+
+  getTask(taskId: string): OrchestratedTask | undefined {
+    return this.taskStore.get(taskId);
+  }
+}

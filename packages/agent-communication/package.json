@@ -20,10 +20,10 @@
     "@vme/shared-types": "workspace:*",
     "@vme/department-hierarchy": "workspace:*",
     "@vme/security-governance": "workspace:*",
+    "@vme/agent-memory": "workspace:*",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "typescript": "^5.7.3"
   }
 }
-

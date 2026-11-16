@@ -189,3 +189,85 @@ flowchart TD
 2. **Dual-Write Consistency:** All domain mutations write to an Outbox table in the same ACID transaction as the business entity, then dispatch asynchronously to Redis Streams.
 3. **Fail-Closed Execution:** Missing permissions or unverified credentials result in immediate rejection, not permissive fallbacks.
 
+
+
+---
+
+### 2.10 Quad-Tier Persistent Agent Memory Architecture (@vme/agent-memory)
+- **Quad-Tier Storage Hierarchy:**
+  1. *Tier 1: Working Memory (`WorkingMemory`):* Ephemeral, task-scoped scratchpads. Features configurable TTL per entry, automated expiration sweep (`cleanupExpired()`), and automatic secret sanitization.
+  2. *Tier 2: Episodic Memory (`EpisodicMemory`):* Time-sequenced audit trail of task inputs, decision rationales, outcomes, lessons learned, and execution durations. 90-day hot retention with automated archival (`archiveOlderThan()`) and Director/Executive authorized deletion.
+  3. *Tier 3: Semantic Memory (`SemanticMemory`):* Vector-indexed corporate and domain knowledge supporting cosine similarity search, metadata filtering, and deprecation management. Implements strict `EmbeddingMetadata` validation (provider, model, dimension) rejecting incompatible vector comparisons with `IncompatibleEmbeddingError`.
+  4. *Tier 4: Procedural Memory (`ProceduralMemory`):* Versioned SOP workflows and playbooks with capability requirements, Director/Executive approval gates, and execution outcome telemetry (`successCount`, `failureCount`).
+- **Three-Tier Boundary Isolation & Centralized ABAC (`MemoryAccessController`):**
+  - `AGENT_PRIVATE`: Accessible exclusively by the owning agent. Seniority does not grant read or write access.
+  - `DEPARTMENT_SCOPED`: Read access for department agents and Executive Office; consolidation and deletion require Director or Executive authority.
+  - `ORGANIZATION_WIDE`: Universal read access across all 30 workforce agents; write, update, and deprecation strictly restricted to Executive Office or Owner principal.
+  - Inactive agents are strictly barred from performing any memory operations.
+- **Cycle-Safe Credential Defense (`SecretRedactor`):** Cycle-safe deep traversal with `WeakSet` preventing recursion overflows; strips or rejects raw secrets matching `RAW_CREDENTIAL_PATTERN` or sensitive property names.
+- **Context Retrieval Engine (`MemoryContextRetriever`):** Multi-tier retrieval using composite relevance scoring ($R = 0.50 \cdot S_{\text{cosine}} + 0.20 \cdot S_{\text{recency}} + 0.15 \cdot S_{\text{importance}} + 0.15 \cdot S_{\text{scope}}$), greedy token budget packing, and deduplication.
+- **Consolidation Pipeline (`MemoryConsolidator`):** Promotes episodic execution patterns into semantic knowledge or procedural SOP playbooks with governance approval requirements.
+- **Emergency Circuit Breaker Freeze:** Memory mutations throw `EmergencyHaltError` during active emergency halts while read queries remain operational.
+- **Database Schema:** PostgreSQL migration `002_agent_memory_schema.sql` creates tables with HNSW index on `vector(1536)`, full-text GIN index, and tenant RLS policies.
+
+---
+
+### 2.11 Inter-Agent Communication & Delegation Protocol (@vme/agent-communication)
+- **Reliable Message Routing (`MessageRouter`):**
+  - Inboxes, delivery states (`PENDING`, `DELIVERED`, `ACKNOWLEDGED`, `FAILED`, `EXPIRED`), delivery acknowledgments (`acknowledgeMessage()`), and dead-letter queue routing with retry (`retryDeadLetter()`).
+  - Idempotency checking to prevent duplicate delivery.
+  - Full schema validation for all 14 canonical typed message schemas (`validateMessagePayload()`).
+- **Hierarchical Communication Boundaries:**
+  - Downward task assignments/delegations verified via `hierarchy.validateDelegation()`.
+  - Upward escalations cannot flow downward from Executive to Specialist.
+  - Cross-department lateral communications between non-director specialists are restricted and require Director gating or Executive coordination.
+- **Consequential Action Interception (`DelegationManager`):**
+  - Gating and quarantining of actions touching `LIVE_TRADING`, `CAPITAL_TRANSFER`, `EXTERNAL_OUTREACH`, and `BINDING_CONTRACT`.
+  - Enforces that only the authentic Owner principal (`OWNER_PRINCIPAL_ID`) can authorize consequential actions; AI agents attempting to self-authorize throw `UnauthorizedOwnerDecisionError`.
+- **Episodic Memory & Emergency Halt Integration:** Logs message dispatches to episodic memory and freezes routing during emergency halts.
+
+---
+
+### 2.12 Empire Autonomy Engine, CEO Orchestration & Tool Runtime (@vme/autonomy-engine)
+- **Autonomous Work Lifecycle Coordination (`AutonomyCoordinator`):**
+  - Ingests strategic directives, decomposes them into initiatives and task DAGs.
+  - Assigns tasks to eligible departmental agents based on `DepartmentRegistry.listAgentRecordsByDepartment()` and `assertCapability()`.
+  - Manages working memory scratchpads and executes routine tasks autonomously.
+  - Quarantines consequential outreach or trading tasks into the Owner authorization queue.
+  - Records execution outcomes into episodic institutional memory.
+- **CEO Orchestration Layer (`CEOOrchestrator`):**
+  - Persona representing `EXEC-CEO` (`CEO_AutonomousDirector`).
+  - Ingests Owner strategic directives (validating `OWNER_PRINCIPAL_ID`).
+  - Dispatches initiatives to Department Directors and compiles Executive Board Reports for the Owner.
+- **Capability-Based Tool Runtime (`ToolExecutionRuntime`):**
+  - Domain tools with required capability tags (`job_market_scraping`, `fx_paper_trading`, `software_architecture`, `outreach_drafting`).
+  - Agent and department capability verification (`hierarchy.assertCapability()`).
+  - Cycle-safe parameter credential inspection (`assertNoRawCredentials()`).
+  - Telemetry logging and emergency halt freezing.
+
+---
+
+### 2.13 Corporate Performance Management & KPI Analytics (@vme/performance-management)
+- **Multi-Factor Agent KPI Scoring (`KPICalculator`):** Computes normalized performance scores (0-100) combining reliability (60%), latency (20%), and token efficiency (20%). Identifies and flags underperforming agents.
+- **Department Budget Oversight (`BudgetTracker`):** Tracks monthly expenditures, burn rate percentage, remaining budget, and spending ceiling limits against indicative department budgets.
+- **Evidence-Based Performance Reviews (`PerformanceReviewEngine`):**
+  - Synthesizes execution metrics into ratings: `EXCEEDS_EXPECTATIONS`, `MEETS_EXPECTATIONS`, `NEEDS_IMPROVEMENT`, `CRITICAL_CONCERN`.
+  - Emits actionable improvement recommendations (`PROMPT_TUNING`, `WORKLOAD_REBALANCING`, `TOOL_TRAINING`, `SUPERVISOR_COACHING`).
+  - **Governance Invariant:** AI evaluations produce recommendations only; they are strictly barred from executing unilateral dismissals, deactivations, or department transfers without Owner/Director authority.
+- **Department Health Analytics (`DepartmentAnalyticsEngine`):** Evaluates overall department success rate, active agents, budget burn rate, top performers, underperformers, and operational bottlenecks (latency >3000ms, budget critical burn >90%).
+
+---
+
+### 2.14 End-to-End Autonomous Corporate Lifecycle (Milestone 2.7)
+- **Unified Workflow Verification (`e2e-corporate-lifecycle.test.ts`):** Validates the full corporate lifecycle across the monorepo:
+  1. Owner submits Strategic Directive to CEO.
+  2. CEO verifies Owner authority, decomposes directive into initiatives and tasks.
+  3. Tasks are delegated to Department Directors and assigned to Specialists.
+  4. Routine tasks execute autonomously via Tool Execution Runtime with working memory scratchpads.
+  5. Consequential tasks are quarantined for Owner review.
+  6. Owner explicitly authorizes quarantined consequential actions; AI self-approvals are rejected.
+  7. Execution outcomes and lessons are committed to Episodic Memory.
+  8. Task metrics and budget burn are recorded in Performance Management.
+  9. Evidence-based performance reviews and department health analytics are generated.
+  10. Executive Board Report is compiled by the CEO and presented to the Owner.
+- **Monorepo Build & Test Verification:** All 12 packages/services compile cleanly (`pnpm -r build`), and all 129 tests across 13 test files pass with 0 failures.

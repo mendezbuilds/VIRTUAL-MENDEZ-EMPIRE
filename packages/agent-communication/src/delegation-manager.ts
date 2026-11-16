@@ -1,4 +1,4 @@
-import type { OrchestratedTask } from '@vme/shared-types';
+import { OWNER_PRINCIPAL_ID, CANONICAL_OWNER_PRINCIPAL, type OrchestratedTask } from '@vme/shared-types';
 import type { DepartmentRegistry } from '@vme/department-hierarchy';
 import type { MessageRouter } from './message-router.js';
 
@@ -11,6 +11,16 @@ export interface OwnerAuthorizationRequest {
   payload: Record<string, unknown>;
   status: 'PENDING_OWNER_REVIEW' | 'APPROVED' | 'REJECTED';
   requestedAt: string;
+  decidedBy?: string;
+  decisionNotes?: string;
+  decidedAt?: string;
+}
+
+export class UnauthorizedOwnerDecisionError extends Error {
+  constructor(message: string) {
+    super(`OWNER GOVERNANCE VIOLATION: ${message}`);
+    this.name = 'UnauthorizedOwnerDecisionError';
+  }
 }
 
 export class DelegationManager {
@@ -52,11 +62,10 @@ export class DelegationManager {
     taskId: string,
     actionType: OwnerAuthorizationRequest['actionType'],
     payload: Record<string, unknown>
-  ): { requiresOwnerApproval: boolean; request?: OwnerAuthorizationRequest } {
-    const agent = this.hierarchy.getAgent(agentId);
+  ): { requiresOwnerApproval: boolean; request: OwnerAuthorizationRequest } {
+    const agent = this.hierarchy.getAgentRecord(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
 
-    // All consequential actions MUST be intercepted and gated
     const request: OwnerAuthorizationRequest = {
       id: `auth-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       taskId,
@@ -72,8 +81,44 @@ export class DelegationManager {
     return { requiresOwnerApproval: true, request };
   }
 
+  /**
+   * Resolves an Owner authorization request.
+   * Strictly enforces that only the authentic Owner principal can authorize consequential actions.
+   */
+  authorizeAction(
+    requestId: string,
+    decision: 'APPROVED' | 'REJECTED',
+    decidedBy: string,
+    decisionNotes?: string
+  ): OwnerAuthorizationRequest {
+    const isOwner =
+      decidedBy === OWNER_PRINCIPAL_ID || decidedBy === CANONICAL_OWNER_PRINCIPAL.principalId;
+
+    if (!isOwner) {
+      throw new UnauthorizedOwnerDecisionError(
+        `Consequential actions can exclusively be authorized by the Owner principal (Stephen Mendez). Agent or caller '${decidedBy}' cannot approve or reject consequential actions.`
+      );
+    }
+
+    const request = this.pendingOwnerApprovals.find((r) => r.id === requestId);
+    if (!request) {
+      throw new Error(`Owner authorization request with id '${requestId}' not found.`);
+    }
+
+    request.status = decision;
+    request.decidedBy = decidedBy;
+    request.decisionNotes = decisionNotes;
+    request.decidedAt = new Date().toISOString();
+
+    return request;
+  }
+
   getPendingOwnerApprovals(): OwnerAuthorizationRequest[] {
     return this.pendingOwnerApprovals.filter((r) => r.status === 'PENDING_OWNER_REVIEW');
+  }
+
+  getRequestById(requestId: string): OwnerAuthorizationRequest | undefined {
+    return this.pendingOwnerApprovals.find((r) => r.id === requestId);
   }
 
   /**
@@ -84,15 +129,17 @@ export class DelegationManager {
     taskId: string,
     errorReason: string
   ): Promise<void> {
-    const agent = this.hierarchy.getAgent(agentId);
+    const agent = this.hierarchy.getAgentRecord(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
 
     // Find the department director to escalate to
-    const director = this.hierarchy.getDepartmentDirector(agent.departmentId);
+    const director = this.hierarchy.getDepartmentDirectorRecord(agent.departmentId);
+    const coo = this.hierarchy.getAgentRecord('EXEC-COO');
+
     const targetSupervisor =
       director && director.id !== agent.id
         ? director
-        : this.hierarchy.getAllAgents().find((a) => a.name === 'ChiefOperatingOfficer')!;
+        : coo ?? this.hierarchy.listAgentRecords().find((a) => a.level === 'EXECUTIVE')!;
 
     await this.router.dispatch({
       senderAgentId: agent.id,
@@ -101,12 +148,16 @@ export class DelegationManager {
       priority: 'CRITICAL',
       taskId,
       payload: {
-        failingAgent: agent.name,
-        errorReason,
-        departmentId: agent.departmentId,
+        reason: `Task failure: ${errorReason}`,
+        severity: 'CRITICAL',
+        escalationTier: director && director.id !== agent.id ? 'DIRECTOR' : 'EXECUTIVE',
+        contextData: {
+          failingAgent: agent.displayName,
+          errorReason,
+          departmentId: agent.departmentId,
+        },
       },
       requiresResponse: true,
     });
   }
 }
-

@@ -4,6 +4,8 @@ import { DepartmentRegistry } from '@vme/department-hierarchy';
 import {
   KPICalculator,
   BudgetTracker,
+  PerformanceReviewEngine,
+  DepartmentAnalyticsEngine,
 } from './index.js';
 
 describe('@vme/performance-management Corporate KPIs & Budget Oversight', () => {
@@ -66,7 +68,6 @@ describe('@vme/performance-management Corporate KPIs & Budget Oversight', () => 
     expect(kpi.tasksAssigned).toBe(5);
     expect(kpi.tasksCompleted).toBe(1);
     expect(kpi.tasksFailed).toBe(4);
-    // Score should be very low (< 50)
     expect(kpi.performanceScore).toBeLessThan(50);
   });
 
@@ -97,5 +98,81 @@ describe('@vme/performance-management Corporate KPIs & Budget Oversight', () => 
     // Additional expense of $40,000 exceeds budget (12500 + 40000 = 52500 > 50000)
     expect(tracker.isWithinBudget('financial_intelligence', 40000)).toBe(false);
   });
-});
 
+  it('generates evidence-based performance reviews with ratings and improvement recommendations', () => {
+    const hierarchy = new DepartmentRegistry();
+    const kpiCalc = new KPICalculator();
+    const reviewEngine = new PerformanceReviewEngine(hierarchy, kpiCalc);
+
+    const scout = hierarchy.getAgentRecord('OPP-SCOUT')!;
+
+    // Record 4 tasks: 3 success, 1 failure
+    for (let i = 0; i < 3; i++) {
+      kpiCalc.recordMetric({
+        agentId: scout.id,
+        agentName: scout.displayName,
+        departmentId: scout.departmentId,
+        durationMs: 400,
+        tokensUsed: 200,
+        costUsd: 0.003,
+        isSuccessful: true,
+      });
+    }
+    kpiCalc.recordMetric({
+      agentId: scout.id,
+      agentName: scout.displayName,
+      departmentId: scout.departmentId,
+      durationMs: 800,
+      tokensUsed: 400,
+      costUsd: 0.006,
+      isSuccessful: false,
+    });
+
+    const review = reviewEngine.generateAgentReview(scout.id, '2026-Q4', 'EXEC-COO');
+
+    expect(review.agentId).toBe(scout.id);
+    expect(review.agentCode).toBe('OPP-SCOUT');
+    expect(review.kpiSummary.tasksAssigned).toBe(4);
+    expect(review.kpiSummary.tasksCompleted).toBe(3);
+    expect(review.overallRating).toBeDefined();
+    expect(review.strengths.length).toBeGreaterThan(0);
+
+    // Verify stored history
+    const history = reviewEngine.getAgentReviews(scout.id);
+    expect(history).toHaveLength(1);
+    expect(history[0]?.id).toBe(review.id);
+  });
+
+  it('DepartmentAnalyticsEngine computes aggregate department health and detects bottlenecks', () => {
+    const hierarchy = new DepartmentRegistry();
+    const kpiCalc = new KPICalculator();
+    const budgetTracker = new BudgetTracker(hierarchy);
+    const analytics = new DepartmentAnalyticsEngine(hierarchy, kpiCalc, budgetTracker);
+
+    const scout = hierarchy.getAgentRecord('OPP-SCOUT')!;
+
+    // Record high latency task to trigger bottleneck detection
+    kpiCalc.recordMetric({
+      agentId: scout.id,
+      agentName: scout.displayName,
+      departmentId: 'opportunity_acquisition',
+      durationMs: 4500, // > 3000ms latency bottleneck
+      tokensUsed: 500,
+      costUsd: 0.01,
+      isSuccessful: true,
+    });
+
+    // Record 95% budget burn
+    const dept = hierarchy.getDepartment('opportunity_acquisition')!;
+    budgetTracker.recordExpense('opportunity_acquisition', dept.budgetMonthlyUsd * 0.95);
+
+    const health = analytics.generateDepartmentHealth('opportunity_acquisition');
+
+    expect(health.departmentId).toBe('opportunity_acquisition');
+    expect(health.totalAgents).toBe(4);
+    expect(health.budgetReport.burnRatePercentage).toBe(95);
+    expect(health.identifiedBottlenecks.length).toBeGreaterThanOrEqual(2);
+    expect(health.identifiedBottlenecks.some((b) => b.includes('High latency bottleneck'))).toBe(true);
+    expect(health.identifiedBottlenecks.some((b) => b.includes('Budget burn rate critical'))).toBe(true);
+  });
+});

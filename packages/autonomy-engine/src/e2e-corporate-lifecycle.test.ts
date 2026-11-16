@@ -1,14 +1,31 @@
 import { describe, it, expect } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { DepartmentRegistry } from '@vme/department-hierarchy';
-import { MessageRouter, DelegationManager } from '@vme/agent-communication';
-import { EpisodicMemory, InMemoryEpisodicStorage } from '@vme/agent-memory';
+import { MessageRouter, DelegationManager, UnauthorizedOwnerDecisionError } from '@vme/agent-communication';
+import {
+  EpisodicMemory,
+  InMemoryEpisodicStorage,
+  WorkingMemory,
+  SemanticMemory,
+  InMemorySemanticStorage,
+  ProceduralMemory,
+  InMemoryProceduralStorage,
+  AgentMemoryEngine,
+} from '@vme/agent-memory';
 import { AgentRegistry, ModelGateway, MockLLMProvider } from '@vme/orchestrator';
 import { EmergencySupervisor } from '@vme/security-governance';
-import { KPICalculator, BudgetTracker } from '@vme/performance-management';
+import {
+  KPICalculator,
+  BudgetTracker,
+  PerformanceReviewEngine,
+  DepartmentAnalyticsEngine,
+} from '@vme/performance-management';
+import { OWNER_PRINCIPAL_ID } from '@vme/shared-types';
 import {
   AutonomyCoordinator,
   ExecutiveReporter,
+  CEOOrchestrator,
+  ToolExecutionRuntime,
 } from './index.js';
 
 describe('VIRTUAL MENDEZ EMPIRE — End-to-End Corporate Lifecycle (Phase 2)', () => {
@@ -19,8 +36,9 @@ describe('VIRTUAL MENDEZ EMPIRE — End-to-End Corporate Lifecycle (Phase 2)', (
     const hierarchy = new DepartmentRegistry();
     const router = new MessageRouter(hierarchy);
     const delegation = new DelegationManager(hierarchy, router);
-    const episodicStorage = new InMemoryEpisodicStorage();
-    const episodic = new EpisodicMemory(episodicStorage);
+    const memoryEngine = new AgentMemoryEngine();
+    const workingMemory = memoryEngine.working;
+    const episodic = memoryEngine.episodic;
 
     const mockLLM = new MockLLMProvider();
     mockLLM.registerCannedResponse('Rust', 'Found 3 Senior Remote Rust Roles ($180k-$220k)');
@@ -35,49 +53,91 @@ describe('VIRTUAL MENDEZ EMPIRE — End-to-End Corporate Lifecycle (Phase 2)', (
       orchestratorRegistry.registerAgent(agent);
     }
 
+    const toolRuntime = new ToolExecutionRuntime(hierarchy, supervisor);
+
     const coordinator = new AutonomyCoordinator(
       hierarchy,
       orchestratorRegistry,
       episodic,
       delegation,
-      supervisor
+      {
+        workingMemory,
+        toolRuntime,
+        emergencySupervisor: supervisor,
+      }
     );
 
     const kpiCalc = new KPICalculator();
     const budgetTracker = new BudgetTracker(hierarchy);
     const reporter = new ExecutiveReporter(hierarchy, delegation);
+    const ceoOrchestrator = new CEOOrchestrator(
+      hierarchy,
+      coordinator,
+      delegation,
+      reporter,
+      supervisor
+    );
+    const reviewEngine = new PerformanceReviewEngine(hierarchy, kpiCalc);
+    const analyticsEngine = new DepartmentAnalyticsEngine(hierarchy, kpiCalc, budgetTracker);
 
-    // 2. Owner submits comprehensive Strategic Directive
+    // 2. Owner submits comprehensive Strategic Directive to CEO
     const ownerDirective = {
       title: 'Q4 Growth: Expand Remote Software Contracts and Backtest FX Strategy',
       description: 'Discover remote Rust and AI contracts, prepare outreach drafts, and conduct forex paper trading backtests in USD and NGN.',
       targetQuarter: 'Q4-2026',
     };
 
-    // 3. Autonomy engine processes directive
-    const executionResult = await coordinator.executeDirective(ownerDirective, tenantId);
+    // Verify imposter submission is barred
+    await expect(
+      ceoOrchestrator.ingestOwnerDirective({
+        directive: ownerDirective,
+        tenantId,
+        submittedBy: 'AGENT_IMPOSTER',
+      })
+    ).rejects.toThrow(/UNAUTHORIZED STRATEGIC DIRECTIVE/);
 
-    // Verify decomposition
+    // Owner issues directive
+    const executionResult = await ceoOrchestrator.ingestOwnerDirective({
+      directive: ownerDirective,
+      tenantId,
+      submittedBy: OWNER_PRINCIPAL_ID,
+    });
+
+    // 3. Verify decomposition and autonomous execution
     expect(executionResult.objective.status).toBe('ACTIVE');
     expect(executionResult.completedTasks.length).toBeGreaterThanOrEqual(2);
     expect(executionResult.quarantinedForOwner.length).toBe(1);
 
-    // Verify routine tasks ran autonomously
     const completedTitles = executionResult.completedTasks.map((t) => t.title);
     expect(completedTitles).toContain('Scan Remote Market Channels');
     expect(completedTitles).toContain('Backtest Mean Reversion Strategy');
 
-    // Verify consequential outreach task was quarantined
+    // 4. Verify consequential outreach task was quarantined for Owner review
     const quarantined = executionResult.quarantinedForOwner[0]!;
     expect(quarantined.title).toBe('Prepare Tailored Outreach Dossier');
     expect(quarantined.status).toBe('WAITING_FEEDBACK');
 
-    // Verify Owner authorization queue
     const pendingApprovals = delegation.getPendingOwnerApprovals();
     expect(pendingApprovals).toHaveLength(1);
     expect(pendingApprovals[0]?.actionType).toBe('EXTERNAL_OUTREACH');
 
-    // 4. Record execution KPIs and budget tracking
+    // AI agent cannot self-authorize consequential action
+    const ceo = hierarchy.getAgentRecord('EXEC-CEO')!;
+    expect(() => {
+      delegation.authorizeAction(pendingApprovals[0]!.id, 'APPROVED', ceo.id);
+    }).toThrow(UnauthorizedOwnerDecisionError);
+
+    // Authentic Owner authorizes the action
+    const approvedRequest = delegation.authorizeAction(
+      pendingApprovals[0]!.id,
+      'APPROVED',
+      OWNER_PRINCIPAL_ID,
+      'Approved after reviewing dossier preview'
+    );
+    expect(approvedRequest.status).toBe('APPROVED');
+    expect(approvedRequest.decidedBy).toBe(OWNER_PRINCIPAL_ID);
+
+    // 5. Record execution KPIs and budget tracking
     for (const task of executionResult.completedTasks) {
       kpiCalc.recordMetric({
         agentId: task.assignedAgentId!,
@@ -92,7 +152,7 @@ describe('VIRTUAL MENDEZ EMPIRE — End-to-End Corporate Lifecycle (Phase 2)', (
       budgetTracker.recordExpense(task.departmentId, 25.0);
     }
 
-    // 5. Verify institutional memory was populated
+    // 6. Verify institutional episodic memory
     const oppHistory = await episodic.getRecentContext({
       departmentId: 'opportunity_acquisition',
     });
@@ -102,23 +162,26 @@ describe('VIRTUAL MENDEZ EMPIRE — End-to-End Corporate Lifecycle (Phase 2)', (
     expect(oppHistory.length).toBeGreaterThanOrEqual(1);
     expect(finHistory.length).toBeGreaterThanOrEqual(1);
 
-    // 6. Generate final Executive Board Report for the Owner
-    const boardReport = reporter.generateReport(
-      [executionResult.objective],
-      executionResult.completedTasks
+    // 7. Generate performance review and department analytics
+    const scoutAgent = hierarchy.getAgentRecord('OPP-SCOUT')!;
+    const performanceReview = reviewEngine.generateAgentReview(
+      scoutAgent.id,
+      '2026-Q4',
+      'EXEC-COO'
     );
+    expect(performanceReview.overallRating).toBeDefined();
+
+    const deptHealth = analyticsEngine.generateDepartmentHealth('opportunity_acquisition');
+    expect(deptHealth.departmentId).toBe('opportunity_acquisition');
+    expect(deptHealth.activeAgents).toBe(4);
+    expect(deptHealth.budgetReport.actualSpentUsd).toBe(25.0);
+
+    // 8. Generate final Executive Board Report for the Owner
+    const boardReport = ceoOrchestrator.generateBoardReport();
 
     expect(boardReport.companyName).toBe('VIRTUAL MENDEZ EMPIRE');
     expect(boardReport.activeObjectivesCount).toBe(1);
     expect(boardReport.completedTasksCount).toBeGreaterThanOrEqual(2);
-    expect(boardReport.pendingOwnerApprovalsCount).toBe(1);
-    expect(boardReport.pendingOwnerApprovals[0]?.actionType).toBe('EXTERNAL_OUTREACH');
-
-    // Verify department budget health
-    const oppBudget = budgetTracker.getDepartmentBudgetReport('opportunity_acquisition');
-    expect(oppBudget.actualSpentUsd).toBe(25.0);
-    expect(oppBudget.remainingBudgetUsd).toBe(9975.0);
-    expect(oppBudget.burnRatePercentage).toBe(0.25);
+    expect(boardReport.departments).toHaveLength(9);
   });
 });
-

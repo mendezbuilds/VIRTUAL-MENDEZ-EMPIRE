@@ -178,6 +178,9 @@ importers:
 
   packages/agent-communication:
     dependencies:
+      '@vme/agent-memory':
+        specifier: workspace:*
+        version: link:../agent-memory
       '@vme/department-hierarchy':
         specifier: workspace:*
         version: link:../department-hierarchy
@@ -197,6 +200,9 @@ importers:
 
   packages/agent-memory:
     dependencies:
+      '@vme/security-governance':
+        specifier: workspace:*
+        version: link:../security-governance
       '@vme/shared-types':
         specifier: workspace:*
         version: link:../shared-types

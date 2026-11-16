@@ -1,4 +1,9 @@
 export * from './working-memory.js';
 export * from './episodic-memory.js';
 export * from './semantic-memory.js';
-
+export * from './procedural-memory.js';
+export * from './secret-redactor.js';
+export * from './memory-access-controller.js';
+export * from './retrieval-engine.js';
+export * from './consolidation-pipeline.js';
+export * from './memory-engine.js';

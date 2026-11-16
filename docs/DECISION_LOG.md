@@ -171,3 +171,102 @@
      - Injects `EmergencySupervisor` (`@vme/security-governance`) into `DepartmentRegistry`.
      - During Tier 1 or Tier 3 emergency halts, all organizational mutations (`appointDirector`, `transferAgent`) immediately throw `EmergencyHaltError`. Read queries remain operational for post-mortem analysis.
 - **Consequences:** The corporate workforce hierarchy runtime is live, auditable, and resilient. Verified with 21 tests in `@vme/department-hierarchy` (113 total monorepo suite tests passing). Ready for Milestone 2.3 upon Owner directive.
+
+
+---
+
+## ADR-013: Quad-Tier Persistent Agent Memory Infrastructure, Boundary Isolation & Consolidation Pipeline (Milestone 2.3)
+- **Status:** APPROVED & IMPLEMENTED
+- **Context:** Milestone 2.3 implements `@vme/agent-memory` to provide persistent, secure, and scalable memory infrastructure for the 30-agent AI workforce, replacing ephemeral single-turn execution with institutional retention.
+- **Decision:**
+  1. **Quad-Tier Memory Architecture:**
+     - *Working Memory:* Ephemeral, task-scoped scratchpads with TTL and active expiration cleanup (`cleanupExpired()`), protecting against memory leaks and data pollution across task lifecycles.
+     - *Episodic Memory:* Time-sequenced action, decision rationale, outcome, and lessons-learned records with 90-day hot retention and automated archival (`archiveOlderThan()`).
+     - *Semantic Memory:* Vector-indexed corporate and domain knowledge supporting cosine similarity search, metadata filtering, and deprecation management. Enforces strict embedding compatibility checks (`EmbeddingMetadata` provider, model, dimension) to prevent corrupted vector comparisons.
+     - *Procedural Memory:* Versioned SOP playbooks with step-by-step instructions, capability requirements, approval states, and execution outcome tracking (`recordExecutionOutcome()`).
+  2. **Three-Tier Boundary Isolation Scopes & Centralized ABAC (`MemoryAccessController`):**
+     - `AGENT_PRIVATE`: Accessible exclusively by the owning agent; superior seniority does not grant access.
+     - `DEPARTMENT_SCOPED`: Read access for all active department agents and Executive Office; mutation and consolidation require Director or Executive authority.
+     - `ORGANIZATION_WIDE`: Universal read access across all 30 workforce agents; write, update, and deprecation strictly restricted to Executive Office or Owner principal.
+     - Inactive agents are strictly barred from performing any memory operations.
+  3. **Credential Defense-in-Depth (`SecretRedactor`):**
+     - Cycle-safe recursive inspection using `WeakSet` traversal.
+     - Automatically strips sensitive fields or throws `SecretRedactionError` in strict mode if raw credentials, bearer tokens, or API keys are detected.
+  4. **Multi-Tier Context Retrieval Engine (`MemoryContextRetriever`):**
+     - Composite relevance ranking: $R = 0.50 \cdot S_{\text{cosine}} + 0.20 \cdot S_{\text{recency}} + 0.15 \cdot S_{\text{importance}} + 0.15 \cdot S_{\text{scope}}$.
+     - Exponential time decay half-life scoring for recency.
+     - Greedy token budget packing with automatic deduplication.
+  5. **Memory Consolidation Pipeline (`MemoryConsolidator`):**
+     - Promotes repeated episodic learnings into persistent semantic knowledge or procedural SOP playbooks.
+     - Scope escalation governance: Promotion to `DEPARTMENT_SCOPED` requires Director/Executive authority; promotion to `ORGANIZATION_WIDE` strictly requires Executive Office or Owner authorization.
+  6. **Emergency Circuit Breaker Integration:**
+     - Memory mutations throw `EmergencyHaltError` during active halts while read queries remain operational for diagnosis.
+- **Consequences:** Provides a production-grade, secure, and auditable memory backbone for the empire. Verified with 11 tests in `@vme/agent-memory`.
+
+---
+
+## ADR-014: Reliable Inter-Agent Communication, Delivery Acknowledgments & Owner Consequential Action Interception (Milestone 2.4)
+- **Status:** APPROVED & IMPLEMENTED
+- **Context:** Milestone 2.4 upgrades `@vme/agent-communication` to establish an auditable, fault-tolerant corporate communication protocol across the 30-agent workforce, enforcing hierarchy rules and Owner authorization gates.
+- **Decision:**
+  1. **Reliable Inter-Agent Messaging (`MessageRouter`):**
+     - Implements inboxes, delivery states (`PENDING`, `DELIVERED`, `ACKNOWLEDGED`, `FAILED`, `EXPIRED`), delivery acknowledgments (`acknowledgeMessage()`), and dead-letter queue routing with retry capabilities (`retryDeadLetter()`).
+     - Idempotency tracking to prevent duplicate message dispatch.
+     - Full support for all 14 canonical typed message schemas and backward-compatible aliases with `validateMessagePayload()`.
+  2. **Hierarchical Routing & Communication Boundaries:**
+     - Downward task assignments/delegations verified via `hierarchy.validateDelegation()`.
+     - Upward escalations cannot flow downward from Executive to Specialist.
+     - Cross-department lateral communications between non-director specialists are strictly blocked unless routed via Director gating or Executive coordination.
+  3. **Consequential Operational Action Interception (`DelegationManager`):**
+     - Automatically intercepts and quarantines actions of type `LIVE_TRADING`, `CAPITAL_TRANSFER`, `EXTERNAL_OUTREACH`, and `BINDING_CONTRACT`.
+     - Strictly enforces that only the authentic Owner principal (`OWNER_PRINCIPAL_ID`) can approve or reject quarantined consequential actions. AI agents (including `EXEC-CEO`) attempting to self-authorize throw `UnauthorizedOwnerDecisionError`.
+  4. **Credential Defense & Emergency Halt:**
+     - Message payloads undergo cycle-safe raw credential detection (`assertNoRawCredentials()`).
+     - Message dispatch immediately throws `EmergencyHaltError` during active emergency halts.
+  5. **Episodic Memory Audit Logging:**
+     - Every message transmission logs an episodic record tracking sender, recipient, type, and correlation ID.
+- **Consequences:** Eliminates message loss, rogue communications, and unauthorized external actions. Verified with 9 tests in `@vme/agent-communication`.
+
+---
+
+## ADR-015: Empire Autonomy Engine, CEO Orchestration & Capability-Based Tool Runtime (Milestone 2.5)
+- **Status:** APPROVED & IMPLEMENTED
+- **Context:** Milestone 2.5 delivers `@vme/autonomy-engine` to manage the end-to-end autonomous work lifecycle across the empire, coordinating directives, delegations, sandboxed tool executions, and executive reporting.
+- **Decision:**
+  1. **Autonomous Work Lifecycle Coordination (`AutonomyCoordinator`):**
+     - Decomposes Owner Strategic Directives into initiatives and task DAGs.
+     - Assigns tasks to eligible departmental agents based on `DepartmentRegistry.listAgentRecordsByDepartment()` and `assertCapability()`.
+     - Allocates task-scoped working memory scratchpads.
+     - Automatically quarantines consequential actions (`EXTERNAL_OUTREACH`, `LIVE_TRADING`, etc.) for Owner authorization.
+     - Executes routine tasks autonomously through the orchestrator model gateway.
+     - Records execution results and outcomes in episodic institutional memory.
+  2. **CEO Orchestration Layer (`CEOOrchestrator`):**
+     - Autonomous executive persona representing `EXEC-CEO` (`CEO_AutonomousDirector`).
+     - Ingests top-level strategic directives from the Owner (verifying `OWNER_PRINCIPAL_ID` and rejecting unauthorized callers).
+     - Coordinates initiatives with Department Directors and compiles Executive Board Reports for the Owner.
+  3. **Capability-Based Tool Runtime & Sandboxing (`ToolExecutionRuntime`):**
+     - Registry of domain tools tagged with required capabilities (`job_market_scraping`, `fx_paper_trading`, `software_architecture`, `outreach_drafting`).
+     - Capability verification: validates that the executing agent's department possesses the required capability via `hierarchy.assertCapability()`.
+     - Cycle-safe credential defense: inspects tool execution arguments to block raw secrets.
+     - Tool execution telemetry: logs durations, success states, and error diagnostics.
+     - Circuit breaker freeze: halts tool execution immediately when emergency halt is active.
+- **Consequences:** Bridges strategic intent to operational tool execution with strict corporate governance. Verified with 4 tests in `@vme/autonomy-engine`.
+
+---
+
+## ADR-016: Performance Management, KPI Analytics, Evidence-Based Reviews & Phase 2 Complete Integration (Milestones 2.6 & 2.7)
+- **Status:** APPROVED & IMPLEMENTED
+- **Context:** Milestones 2.6 and 2.7 establish performance tracking, department analytics, evidence-based evaluations, and full monorepo end-to-end integration for Virtual MENDEZ EMPIRE.
+- **Decision:**
+  1. **Agent Performance Profiles & Scoring (`KPICalculator`):**
+     - Tracks completed/failed tasks, cycle duration, token usage, and costs.
+     - Computes normalized performance scores (0-100) combining reliability (60 pts), latency (20 pts), and token efficiency (20 pts).
+  2. **Department Performance Analytics (`DepartmentAnalyticsEngine`):**
+     - Evaluates department health: success rates, active workforce, budget burn rate, top performers, underperforming agents, and operational bottlenecks (latency bottlenecks >3000ms, budget critical burn >90%).
+  3. **Evidence-Based Evaluation & Review Engine (`PerformanceReviewEngine`):**
+     - Evaluates agents into ratings: `EXCEEDS_EXPECTATIONS`, `MEETS_EXPECTATIONS`, `NEEDS_IMPROVEMENT`, `CRITICAL_CONCERN`.
+     - Emits actionable improvement recommendations (`PROMPT_TUNING`, `WORKLOAD_REBALANCING`, `TOOL_TRAINING`, `SUPERVISOR_COACHING`).
+     - **Governance Invariant:** AI evaluations produce recommendations only; they are strictly barred from executing unilateral dismissals, deactivations, or department transfers without Owner/Director authority.
+  4. **Phase 2 End-to-End Multi-Agent Corporate Lifecycle (`e2e-corporate-lifecycle.test.ts`):**
+     - Validates full monorepo corporate workflow: Owner directive ingestion -> CEO decomposition -> Director delegation -> Routine specialist execution with tool runtime & working memory -> Consequential action quarantine -> Owner authorization verification -> Episodic memory recording -> KPI tracking & budget burn update -> Performance review generation -> Department health analytics -> Executive Board Report presentation.
+- **Consequences:** Delivers a fully operational, integrated, verified, and self-governing AI corporate workforce ready for Phase 3. Verified across all 13 test suites (129 passing tests).
