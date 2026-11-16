@@ -1,19 +1,24 @@
 import { z } from 'zod';
+import { randomUUID } from 'node:crypto';
 import {
   DepartmentIdSchema,
   OrganizationalLevelSchema,
   compareOrganizationalLevels,
+  CANONICAL_DEPARTMENTS,
+  type Department,
   type DepartmentId,
   type OrganizationalLevel,
 } from './organization.js';
 import {
   PermissionProfileSchema,
+  MANDATORY_PROHIBITED_FOR_ALL_AGENTS,
+  assertNonOwnerProfileValid,
   type PermissionProfile,
 } from './authority.js';
 import type { AgentSpec } from './orchestration.js';
 
 /**
- * Unique Agent Code Schema (e.g. EXEC-CEO, TECH-CTO, OPP-SCOUT)
+ * Unique Agent Code Schema (e.g. EXEC-CEO, TECH-CTO, OPP-SCOUT, TECH-QA)
  */
 export const AgentCodeSchema = z
   .string()
@@ -66,14 +71,28 @@ export const AgentModelConfigSchema = z.object({
 export type AgentModelConfig = z.infer<typeof AgentModelConfigSchema>;
 
 /**
- * Canonical Agent Identity Data Contract
- * Represents an immutable, stable AI employee identity in Virtual MENDEZ EMPIRE
+ * PERMANENT IMMUTABLE AGENT IDENTITY
+ * Represents an unchangeable identity anchor that survives title, supervisor,
+ * responsibility, and permission reconfigurations.
  */
 export const AgentIdentitySchema = z.object({
   id: z.string().uuid(),
   agentCode: AgentCodeSchema,
-  displayName: z.string().min(1).max(100),
   departmentId: DepartmentIdSchema,
+  createdAt: z.string().datetime(),
+});
+
+export type AgentIdentity = z.infer<typeof AgentIdentitySchema>;
+
+/**
+ * MUTABLE VERSIONED AGENT CONFIGURATION
+ * Encapsulates all attributes that may evolve over an employee's lifecycle
+ * (job title, supervisor, capabilities, permissions, operational status, version).
+ */
+export const AgentConfigurationSchema = z.object({
+  configurationId: z.string().uuid(),
+  agentId: z.string().uuid(),
+  displayName: z.string().min(1).max(100),
   jobTitle: z.string().min(1).max(100),
   level: OrganizationalLevelSchema,
   roleDescription: z.string().min(1),
@@ -83,16 +102,112 @@ export const AgentIdentitySchema = z.object({
   permissionProfile: PermissionProfileSchema,
   operationalStatus: AgentOperationalStatusSchema.default('ACTIVE'),
   modelConfig: AgentModelConfigSchema,
-  createdAt: z.string().datetime(),
   configVersion: z.string().default('1.0.0'),
+  effectiveFrom: z.string().datetime(),
+  updatedAt: z.string().datetime(),
 });
 
-export type AgentIdentity = z.infer<typeof AgentIdentitySchema>;
+export type AgentConfiguration = z.infer<typeof AgentConfigurationSchema>;
 
 /**
- * Maps an AgentIdentity to an AgentSpec for Phase 1 backward compatibility.
+ * COMPOSITE AGENT EMPLOYEE RECORD
+ * Combines permanent immutable identity with current versioned mutable configuration.
+ * Exposes flat convenience properties for seamless backward compatibility.
  */
-export function toAgentSpec(agent: AgentIdentity): AgentSpec {
+export interface AgentRecord {
+  // Immutable identity partition
+  identity: AgentIdentity;
+  // Current versioned configuration partition
+  currentConfig: AgentConfiguration;
+
+  // Flattened convenience accessors (backward compatible with AgentIdentity interface)
+  id: string;
+  agentCode: string;
+  departmentId: DepartmentId;
+  createdAt: string;
+  displayName: string;
+  jobTitle: string;
+  level: OrganizationalLevel;
+  roleDescription: string;
+  supervisor: AgentSupervisor;
+  assignedResponsibilities: string[];
+  requiredCapabilities: string[];
+  permissionProfile: PermissionProfile;
+  operationalStatus: AgentOperationalStatus;
+  modelConfig: AgentModelConfig;
+  configVersion: string;
+}
+
+/**
+ * Helper to construct a canonical AgentRecord from identity and configuration.
+ */
+export function createAgentRecord(
+  identity: AgentIdentity,
+  currentConfig: AgentConfiguration
+): AgentRecord {
+  // Validate that configuration references the correct immutable identity ID
+  if (currentConfig.agentId !== identity.id) {
+    throw new Error(
+      `Configuration agentId mismatch: config references '${currentConfig.agentId}', but identity ID is '${identity.id}'`
+    );
+  }
+
+  return {
+    identity: { ...identity },
+    currentConfig: { ...currentConfig },
+    get id() { return this.identity.id; },
+    get agentCode() { return this.identity.agentCode; },
+    get departmentId() { return this.identity.departmentId; },
+    get createdAt() { return this.identity.createdAt; },
+    get displayName() { return this.currentConfig.displayName; },
+    get jobTitle() { return this.currentConfig.jobTitle; },
+    get level() { return this.currentConfig.level; },
+    get roleDescription() { return this.currentConfig.roleDescription; },
+    get supervisor() { return this.currentConfig.supervisor; },
+    get assignedResponsibilities() { return this.currentConfig.assignedResponsibilities; },
+    get requiredCapabilities() { return this.currentConfig.requiredCapabilities; },
+    get permissionProfile() { return this.currentConfig.permissionProfile; },
+    get operationalStatus() { return this.currentConfig.operationalStatus; },
+    get modelConfig() { return this.currentConfig.modelConfig; },
+    get configVersion() { return this.currentConfig.configVersion; },
+  };
+}
+
+/**
+ * Updates mutable agent configuration without modifying permanent immutable identity.
+ * Changing title, supervisor, responsibilities, or permissions strictly preserves
+ * the permanent agent ID and agent code.
+ */
+export function updateAgentConfiguration(
+  record: AgentRecord,
+  updates: Partial<Omit<AgentConfiguration, 'configurationId' | 'agentId' | 'effectiveFrom' | 'updatedAt'>>,
+  newVersion?: string
+): AgentRecord {
+  const updatedConfig: AgentConfiguration = {
+    ...record.currentConfig,
+    ...updates,
+    configurationId: randomUUID(),
+    agentId: record.identity.id, // Strictly preserve immutable ID
+    configVersion: newVersion ?? incrementPatchVersion(record.currentConfig.configVersion),
+    effectiveFrom: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  return createAgentRecord(record.identity, updatedConfig);
+}
+
+function incrementPatchVersion(version: string): string {
+  const parts = version.split('.').map((p) => parseInt(p, 10));
+  if (parts.length === 3 && parts[0] !== undefined && parts[1] !== undefined && parts[2] !== undefined && !parts.some(isNaN)) {
+    return `${parts[0]}.${parts[1]}.${parts[2] + 1}`;
+  }
+  return `${version}.1`;
+}
+
+/**
+ * Maps an AgentRecord / AgentIdentity to an AgentSpec for Phase 1 backward compatibility.
+ */
+export function toAgentSpec(agent: AgentRecord): AgentSpec {
   const tierMap: Record<OrganizationalLevel, AgentSpec['tier']> = {
     OWNER: 'executive',
     EXECUTIVE: 'executive',
@@ -114,7 +229,7 @@ export function toAgentSpec(agent: AgentIdentity): AgentSpec {
     maxParallelTasks: agent.modelConfig.maxParallelTasks,
     isActive: agent.operationalStatus === 'ACTIVE',
     createdAt: agent.createdAt,
-    updatedAt: agent.createdAt,
+    updatedAt: agent.currentConfig.updatedAt,
   };
 }
 
@@ -139,16 +254,10 @@ function buildPermissionProfile(
     allowedPermissions,
     maxBudgetApprovalUsd,
     maxDelegationDepth,
-    prohibitedRestrictedActions: [
-      'CAPITAL_TRANSFER',
-      'LIVE_TRADING_EXECUTION',
-      'GOVERNANCE_OVERRIDE',
-      'PERMISSION_ELEVATION',
-    ],
+    prohibitedRestrictedActions: MANDATORY_PROHIBITED_FOR_ALL_AGENTS,
     requiresOwnerAuthorizationFor: [
       'EXTERNAL_COMMUNICATION',
       'JOB_APPLICATION_SUBMISSION',
-      'BINDING_CONTRACT_ACCEPTANCE',
       'SPENDING_EXCEEDING_LIMIT',
       'EMERGENCY_SHUTDOWN_OVERRIDE',
     ],
@@ -158,186 +267,223 @@ function buildPermissionProfile(
   };
 }
 
+function createFoundingAgent(
+  id: string,
+  agentCode: string,
+  departmentId: DepartmentId,
+  displayName: string,
+  jobTitle: string,
+  level: OrganizationalLevel,
+  roleDescription: string,
+  supervisor: AgentSupervisor,
+  assignedResponsibilities: string[],
+  requiredCapabilities: string[],
+  permissionProfile: PermissionProfile,
+  systemPrompt: string,
+  allowedTools: string[],
+  maxParallelTasks = 3
+): AgentRecord {
+  const identity: AgentIdentity = {
+    id,
+    agentCode,
+    departmentId,
+    createdAt: '2026-01-01T00:00:00.000Z',
+  };
+
+  const currentConfig: AgentConfiguration = {
+    configurationId: `20000000-0000-0000-0000-${agentCode.replace(/[^0-9]/g, '').padStart(12, '0')}`,
+    agentId: id,
+    displayName,
+    jobTitle,
+    level,
+    roleDescription,
+    supervisor,
+    assignedResponsibilities,
+    requiredCapabilities,
+    permissionProfile,
+    operationalStatus: 'ACTIVE',
+    modelConfig: {
+      modelProvider: 'mock',
+      modelId: 'mock-llm-v1',
+      temperature: level === 'DIRECTOR' || level === 'EXECUTIVE' ? 0.2 : 0.3,
+      systemPrompt,
+      allowedTools,
+      maxParallelTasks,
+      timeoutMs: 60000,
+    },
+    configVersion: '1.0.0',
+    effectiveFrom: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+
+  return createAgentRecord(identity, currentConfig);
+}
+
 /**
  * CANONICAL 30 FOUNDING AI EMPLOYEE IDENTITIES
+ * With complete separation of immutable permanent identity and versioned mutable configuration.
+ * All executive permissions are explicitly non-escalating and subordinate to Owner authority.
  */
-export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
+export const CANONICAL_FOUNDING_AGENTS: AgentRecord[] = [
   // =========================================================================
   // 1. Executive Office (2 agents)
   // =========================================================================
-  {
-    id: '00000000-0000-0000-0000-000000000001',
-    agentCode: 'EXEC-CEO',
-    displayName: 'CEO_AutonomousDirector',
-    departmentId: 'executive_office',
-    jobTitle: 'Chief Executive Officer & Autonomous Director',
-    level: 'EXECUTIVE',
-    roleDescription: 'Translates Owner directives into corporate strategy, coordinates all 9 departments, and compiles executive board reports.',
-    supervisor: {
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000001',
+    'EXEC-CEO',
+    'executive_office',
+    'CEO_AutonomousDirector',
+    'Chief Executive Officer & Autonomous Director',
+    'EXECUTIVE',
+    'Translates Owner directives into corporate strategy, coordinates all 9 departments, and compiles executive board reports. Subordinate to Owner authority.',
+    {
       supervisorAgentId: null,
       reportsToOwner: true,
     },
-    assignedResponsibilities: [
+    [
       'Translate Owner directives into actionable initiatives',
       'Coordinate and oversee all department directors',
       'Compile weekly executive board reports',
-      'Allocate departmental monthly operational budgets',
+      'Recommend departmental monthly operational budget allocations',
     ],
-    requiredCapabilities: [
+    [
       'strategic_planning',
       'executive_reporting',
       'budget_allocation',
       'cross_dept_governance',
       'objective_decomposition',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '001',
       'Executive CEO Profile',
       'EXECUTIVE_WIDE',
-      ['*'],
+      [
+        'strategic:plan',
+        'strategic:decompose',
+        'executive:report',
+        'executive:coordinate',
+        'dept:supervise',
+        'task:assign',
+        'task:delegate',
+        'budget:recommend',
+        'kpi:review',
+      ],
       10000,
       5,
       true
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.2,
-      systemPrompt: 'You are the CEO and Autonomous Director of Virtual Mendez Empire. You translate Owner directives into corporate strategy and hold all department directors accountable.',
-      allowedTools: ['decompose_objective', 'delegate_task', 'approve_budget', 'compile_board_report'],
-      maxParallelTasks: 10,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000002',
-    agentCode: 'EXEC-COO',
-    displayName: 'ChiefOperatingOfficer',
-    departmentId: 'executive_office',
-    jobTitle: 'Chief Operating Officer',
-    level: 'EXECUTIVE',
-    roleDescription: 'Oversees operational execution across departments, resolves cross-department bottlenecks, and monitors SLAs.',
-    supervisor: {
+    'You are the CEO and Autonomous Director of Virtual Mendez Empire. You translate Owner directives into corporate strategy and hold all department directors accountable. You remain subordinate to Owner authority; capital transfers, live trading, and binding contracts are barred.',
+    ['decompose_objective', 'delegate_task', 'approve_budget', 'compile_board_report'],
+    10
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000002',
+    'EXEC-COO',
+    'executive_office',
+    'ChiefOperatingOfficer',
+    'Chief Operating Officer',
+    'EXECUTIVE',
+    'Oversees operational execution across departments, resolves cross-department bottlenecks, and monitors SLAs.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000001',
       supervisorAgentCode: 'EXEC-CEO',
       reportsToOwner: false,
       escalationAgentId: '00000000-0000-0000-0000-000000000001',
     },
-    assignedResponsibilities: [
+    [
       'Monitor company-wide execution health and SLAs',
       'Triage and resolve cross-department operational blockers',
       'Supervise Operations & Administration department head',
       'Coordinate resource scheduling and load balancing',
     ],
-    requiredCapabilities: [
+    [
       'inspect_operations',
       'reassign_task',
       'escalate_incident',
       'cross_dept_governance',
       'workflow_orchestration',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '002',
       'Executive COO Profile',
       'EXECUTIVE_WIDE',
-      ['ops:*', 'task:*', 'report:*', 'inspect:*'],
+      ['ops:inspect', 'ops:reassign', 'task:reassign', 'task:escalate', 'report:compile'],
       5000,
       4,
       true
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.2,
-      systemPrompt: 'You are the COO of Virtual Mendez Empire. You oversee interdepartmental execution, resolve operational bottlenecks, and monitor company-wide SLAs.',
-      allowedTools: ['inspect_operations', 'reassign_task', 'escalate_incident'],
-      maxParallelTasks: 8,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
+    'You are the COO of Virtual Mendez Empire. You oversee interdepartmental execution, resolve operational bottlenecks, and monitor company-wide SLAs.',
+    ['inspect_operations', 'reassign_task', 'escalate_incident'],
+    8
+  ),
 
   // =========================================================================
   // 2. Financial Intelligence (4 agents)
   // =========================================================================
-  {
-    id: '00000000-0000-0000-0000-000000000003',
-    agentCode: 'FIN-CFO',
-    displayName: 'ChiefFinancialDirector',
-    departmentId: 'financial_intelligence',
-    jobTitle: 'Chief Financial Officer & Director of Financial Intelligence',
-    level: 'DIRECTOR',
-    roleDescription: 'Safeguards the central treasury, enforces double-entry immutability, manages dual-currency (USD/NGN) budget burn, and supervises financial analysts.',
-    supervisor: {
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000003',
+    'FIN-CFO',
+    'financial_intelligence',
+    'ChiefFinancialDirector',
+    'Chief Financial Officer & Director of Financial Intelligence',
+    'DIRECTOR',
+    'Safeguards the central treasury, enforces double-entry immutability, manages dual-currency (USD/NGN) budget burn, and supervises financial analysts.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000001',
       supervisorAgentCode: 'EXEC-CEO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Enforce zero-sum double-entry ledger immutability',
       'Authorize department spending requests within approved budget',
       'Supervise Treasury Accountant, FX Analyst, and Crypto Analyst',
       'Enforce strict ban on unauthorized live trading and capital transfer',
     ],
-    requiredCapabilities: [
+    [
       'approve_expenditure',
       'audit_ledger',
       'verify_hash_chain',
       'treasury_management',
       'ledger_accounting',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '003',
       'Financial Intelligence Director Profile',
       'DEPARTMENT_SCOPED',
-      ['financial:*', 'ledger:*', 'treasury:*', 'task:delegate'],
+      ['financial:audit', 'financial:approve', 'ledger:audit', 'treasury:manage', 'task:delegate'],
       50000,
       3,
       true
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.1,
-      systemPrompt: 'You are the CFO and Director of Financial Intelligence. You safeguard the central treasury, enforce double-entry immutability, and manage financial risk.',
-      allowedTools: ['approve_expenditure', 'audit_ledger', 'verify_hash_chain'],
-      maxParallelTasks: 5,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000004',
-    agentCode: 'FIN-ACC',
-    displayName: 'TreasuryAccountant',
-    departmentId: 'financial_intelligence',
-    jobTitle: 'Lead Treasury & Ledger Accountant',
-    level: 'SPECIALIST',
-    roleDescription: 'Prepares cryptographically chained double-entry journal postings in USD and NGN, and reconciles balances.',
-    supervisor: {
+    'You are the CFO and Director of Financial Intelligence. You safeguard the central treasury, enforce double-entry immutability, and manage financial risk.',
+    ['approve_expenditure', 'audit_ledger', 'verify_hash_chain'],
+    5
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000004',
+    'FIN-ACC',
+    'financial_intelligence',
+    'TreasuryAccountant',
+    'Lead Treasury & Ledger Accountant',
+    'SPECIALIST',
+    'Prepares cryptographically chained double-entry journal postings in USD and NGN, and reconciles balances.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000003',
       supervisorAgentCode: 'FIN-CFO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Post verified double-entry journal entries',
       'Verify cryptographic hash chains across journal records',
       'Reconcile multi-currency account balances (USD and NGN)',
     ],
-    requiredCapabilities: [
+    [
       'post_journal_entry',
       'reconcile_balances',
       'ledger_accounting',
       'verify_hash_chain',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '004',
       'Treasury Accountant Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -346,44 +492,35 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.1,
-      systemPrompt: 'You are the Treasury Accountant. You prepare double-entry journal postings in USD, NGN, and reserve currencies.',
-      allowedTools: ['post_journal_entry', 'reconcile_balances'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000005',
-    agentCode: 'FIN-FXA',
-    displayName: 'FX_TradingAnalyst',
-    departmentId: 'financial_intelligence',
-    jobTitle: 'Foreign Exchange & Macro Paper Trading Analyst',
-    level: 'SPECIALIST',
-    roleDescription: 'Researches foreign exchange markets, backtests strategies, and executes simulated paper trades. Live trading is strictly prohibited.',
-    supervisor: {
+    'You are the Treasury Accountant. You prepare double-entry journal postings in USD, NGN, and reserve currencies.',
+    ['post_journal_entry', 'reconcile_balances'],
+    3
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000005',
+    'FIN-FXA',
+    'financial_intelligence',
+    'FX_TradingAnalyst',
+    'Foreign Exchange & Macro Paper Trading Analyst',
+    'SPECIALIST',
+    'Researches foreign exchange markets, backtests strategies, and executes simulated paper trades. Live trading is strictly prohibited.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000003',
       supervisorAgentCode: 'FIN-CFO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Perform historical FX strategy backtests',
       'Execute simulated paper trades in sandbox environment',
       'Synthesize macro currency intelligence reports',
     ],
-    requiredCapabilities: [
+    [
       'backtest_fx',
       'paper_trade_fx',
       'analyze_forex_news',
       'risk_auditing',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '005',
       'FX Analyst Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -392,44 +529,35 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.2,
-      systemPrompt: 'You are the FX Market Analyst. You backtest currency strategies and conduct simulated paper trading. Live trading is strictly prohibited.',
-      allowedTools: ['backtest_fx', 'paper_trade_fx', 'analyze_forex_news'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000006',
-    agentCode: 'FIN-CRY',
-    displayName: 'CryptoDegenAnalyst',
-    departmentId: 'financial_intelligence',
-    jobTitle: 'Crypto & DeFi Risk Analyst',
-    level: 'SPECIALIST',
-    roleDescription: 'Researches on-chain liquidity, evaluates DeFi protocols, and executes paper trading of digital assets.',
-    supervisor: {
+    'You are the FX Market Analyst. You backtest currency strategies and conduct simulated paper trading. Live trading is strictly prohibited.',
+    ['backtest_fx', 'paper_trade_fx', 'analyze_forex_news'],
+    3
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000006',
+    'FIN-CRY',
+    'financial_intelligence',
+    'CryptoDegenAnalyst',
+    'Crypto & DeFi Risk Analyst',
+    'SPECIALIST',
+    'Researches on-chain liquidity, evaluates DeFi protocols, and executes paper trading of digital assets.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000003',
       supervisorAgentCode: 'FIN-CFO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Analyze on-chain liquidity pools and smart contract risks',
       'Backtest algorithmic cryptocurrency strategies',
       'Execute simulated crypto paper trades with strict zero live capital',
     ],
-    requiredCapabilities: [
+    [
       'analyze_onchain_metrics',
       'paper_trade_crypto',
       'audit_smart_contract_risk',
       'crypto_paper_trading',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '006',
       'Crypto Analyst Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -438,95 +566,77 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.3,
-      systemPrompt: 'You are the Crypto and DeFi Analyst. You research on-chain liquidity, tokenomics, and paper trade digital assets.',
-      allowedTools: ['analyze_onchain_metrics', 'paper_trade_crypto', 'audit_smart_contract_risk'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
+    'You are the Crypto and DeFi Analyst. You research on-chain liquidity, tokenomics, and paper trade digital assets.',
+    ['analyze_onchain_metrics', 'paper_trade_crypto', 'audit_smart_contract_risk'],
+    3
+  ),
 
   // =========================================================================
   // 3. Technology & Engineering (5 agents)
   // =========================================================================
-  {
-    id: '00000000-0000-0000-0000-000000000007',
-    agentCode: 'TECH-CTO',
-    displayName: 'ChiefTechnologyDirector',
-    departmentId: 'technology_engineering',
-    jobTitle: 'Chief Technology Officer & Director of Technology',
-    level: 'DIRECTOR',
-    roleDescription: 'Leads engineering strategy, software architecture, code reviews, automated CI/CD gates, and engineering hygiene.',
-    supervisor: {
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000007',
+    'TECH-CTO',
+    'technology_engineering',
+    'ChiefTechnologyDirector',
+    'Chief Technology Officer & Director of Technology',
+    'DIRECTOR',
+    'Leads engineering strategy, software architecture, code reviews, automated CI/CD gates, and engineering hygiene.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000001',
       supervisorAgentCode: 'EXEC-CEO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Review and approve system architectures and ADRs',
       'Enforce testing and verification gates across the codebase',
       'Direct software development, infrastructure, and QA specialists',
     ],
-    requiredCapabilities: [
+    [
       'review_architecture',
       'enforce_testing_gate',
       'approve_release',
       'software_architecture',
       'platform_security',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '007',
       'Technology Director Profile',
       'DEPARTMENT_SCOPED',
-      ['tech:*', 'code:*', 'repo:*', 'task:delegate'],
+      ['tech:review', 'tech:approve', 'code:review', 'repo:manage', 'task:delegate'],
       25000,
       3,
       true
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.2,
-      systemPrompt: 'You are the CTO and Director of Technology & Engineering. You enforce software architecture, test coverage, and modular code hygiene.',
-      allowedTools: ['review_architecture', 'enforce_testing_gate', 'approve_release'],
-      maxParallelTasks: 5,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000008',
-    agentCode: 'TECH-ARCH',
-    displayName: 'SoftwareArchitectBot',
-    departmentId: 'technology_engineering',
-    jobTitle: 'Lead Software Architect',
-    level: 'SPECIALIST',
-    roleDescription: 'Designs domain schemas, data models, system interfaces, and authors Architectural Decision Records (ADRs).',
-    supervisor: {
+    'You are the CTO and Director of Technology & Engineering. You enforce software architecture, test coverage, and modular code hygiene.',
+    ['review_architecture', 'enforce_testing_gate', 'approve_release'],
+    5
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000008',
+    'TECH-ARCH',
+    'technology_engineering',
+    'SoftwareArchitectBot',
+    'Lead Software Architect',
+    'SPECIALIST',
+    'Designs domain schemas, data models, system interfaces, and authors Architectural Decision Records (ADRs).',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000007',
       supervisorAgentCode: 'TECH-CTO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Design modular, strongly-typed TypeScript and database schemas',
       'Draft Architectural Decision Records (ADRs)',
       'Analyze codebase consistency and eliminate circular dependencies',
     ],
-    requiredCapabilities: [
+    [
       'design_system',
       'write_adr',
       'generate_schemas',
       'software_architecture',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '008',
       'Software Architect Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -535,44 +645,35 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.2,
-      systemPrompt: 'You are the Lead Software Architect. You design data structures, API contracts, and scalable services.',
-      allowedTools: ['design_system', 'write_adr', 'generate_schemas'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000009',
-    agentCode: 'TECH-FSE',
-    displayName: 'FullStackEngineerBot',
-    departmentId: 'technology_engineering',
-    jobTitle: 'Senior Full Stack Engineer',
-    level: 'SPECIALIST',
-    roleDescription: 'Implements production TypeScript services, API routes, database integrations, and comprehensive unit tests.',
-    supervisor: {
+    'You are the Lead Software Architect. You design data structures, API contracts, and scalable services.',
+    ['design_system', 'write_adr', 'generate_schemas'],
+    3
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000009',
+    'TECH-FSE',
+    'technology_engineering',
+    'FullStackEngineerBot',
+    'Senior Full Stack Engineer',
+    'SPECIALIST',
+    'Implements production TypeScript services, API routes, database integrations, and comprehensive unit tests.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000007',
       supervisorAgentCode: 'TECH-CTO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Implement robust backend and frontend software components',
       'Write exhaustive unit and integration tests with Vitest',
       'Refactor services for modularity and performance',
     ],
-    requiredCapabilities: [
+    [
       'implement_feature',
       'write_unit_tests',
       'refactor_code',
       'code_generation',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '009',
       'Full Stack Engineer Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -581,44 +682,35 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.2,
-      systemPrompt: 'You are the Full Stack Engineer. You implement clean TypeScript services, API endpoints, and database interactions.',
-      allowedTools: ['implement_feature', 'write_unit_tests', 'refactor_code'],
-      maxParallelTasks: 4,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000023',
-    agentCode: 'TECH-DEVOPS',
-    displayName: 'DevOpsPlatformEngineerBot',
-    departmentId: 'technology_engineering',
-    jobTitle: 'DevOps & Platform Reliability Engineer',
-    level: 'SPECIALIST',
-    roleDescription: 'Manages CI/CD automation pipelines, container infrastructure, system telemetry, and platform uptime.',
-    supervisor: {
+    'You are the Full Stack Engineer. You implement clean TypeScript services, API endpoints, and database interactions.',
+    ['implement_feature', 'write_unit_tests', 'refactor_code'],
+    4
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000023',
+    'TECH-DEVOPS',
+    'technology_engineering',
+    'DevOpsPlatformEngineerBot',
+    'DevOps & Platform Reliability Engineer',
+    'SPECIALIST',
+    'Manages CI/CD automation pipelines, container infrastructure, system telemetry, and platform uptime.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000007',
       supervisorAgentCode: 'TECH-CTO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Maintain automated build, lint, and test pipelines',
       'Configure Docker containers and PostgreSQL/Redis instances',
       'Monitor application metrics, error rates, and system logs',
     ],
-    requiredCapabilities: [
+    [
       'manage_infrastructure',
       'monitor_telemetry',
       'deploy_service',
       'ci_cd_automation',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '023',
       'DevOps Platform Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -627,44 +719,35 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.2,
-      systemPrompt: 'You are the DevOps & Platform Reliability Engineer. You ensure pipeline reliability, infrastructure stability, and deployment automation.',
-      allowedTools: ['manage_infrastructure', 'monitor_telemetry', 'deploy_service'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000024',
-    agentCode: 'TECH-QA',
-    displayName: 'QASystemsVerifierBot',
-    departmentId: 'technology_engineering',
-    jobTitle: 'QA & Systems Verification Specialist',
-    level: 'SPECIALIST',
-    roleDescription: 'Executes automated end-to-end regression suites, verifies bug fixes, and enforces quality metrics across all packages.',
-    supervisor: {
+    'You are the DevOps & Platform Reliability Engineer. You ensure pipeline reliability, infrastructure stability, and deployment automation.',
+    ['manage_infrastructure', 'monitor_telemetry', 'deploy_service'],
+    3
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000024',
+    'TECH-QA',
+    'technology_engineering',
+    'QASystemsVerifierBot',
+    'QA & Systems Verification Specialist',
+    'SPECIALIST',
+    'Executes automated end-to-end regression suites, verifies bug fixes, and enforces quality metrics across all packages.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000007',
       supervisorAgentCode: 'TECH-CTO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Execute continuous verification test suites across all packages',
       'Verify schema constraints and boundary cases',
       'Audit test pass rates and report quality benchmarks to CTO',
     ],
-    requiredCapabilities: [
+    [
       'execute_test_suite',
       'verify_regressions',
       'report_quality_metrics',
       'ci_cd_automation',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '024',
       'QA Systems Verifier Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -673,95 +756,77 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.1,
-      systemPrompt: 'You are the QA Systems Verification Specialist. You audit software quality, run regression suites, and guarantee zero defects.',
-      allowedTools: ['execute_test_suite', 'verify_regressions', 'report_quality_metrics'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
+    'You are the QA Systems Verification Specialist. You audit software quality, run regression suites, and guarantee zero defects.',
+    ['execute_test_suite', 'verify_regressions', 'report_quality_metrics'],
+    3
+  ),
 
   // =========================================================================
   // 4. Business Development (3 agents)
   // =========================================================================
-  {
-    id: '00000000-0000-0000-0000-000000000010',
-    agentCode: 'BIZ-DIR',
-    displayName: 'BusinessDevDirector',
-    departmentId: 'business_development',
-    jobTitle: 'Director of Business Development',
-    level: 'DIRECTOR',
-    roleDescription: 'Drives enterprise B2B deal acquisition, strategic partnerships, commercial pipeline, and new venture revenue.',
-    supervisor: {
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000010',
+    'BIZ-DIR',
+    'business_development',
+    'BusinessDevDirector',
+    'Director of Business Development',
+    'DIRECTOR',
+    'Drives enterprise B2B deal acquisition, strategic partnerships, commercial pipeline, and new venture revenue.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000001',
       supervisorAgentCode: 'EXEC-CEO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Qualify B2B partnerships and commercial leads',
       'Approve commercial proposal structures and pricing models',
       'Manage sales and enterprise partnership pipelines',
     ],
-    requiredCapabilities: [
+    [
       'qualify_opportunity',
       'approve_deal_structure',
       'manage_pipeline',
       'deal_sourcing',
       'b2b_negotiation',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '010',
       'Business Development Director Profile',
       'DEPARTMENT_SCOPED',
-      ['biz:*', 'pipeline:*', 'deal:*', 'task:delegate'],
+      ['biz:qualify', 'biz:approve_structure', 'pipeline:manage', 'task:delegate'],
       15000,
       3,
       true
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.3,
-      systemPrompt: 'You are the Director of Business Development. You drive enterprise client acquisition, strategic partnerships, and new venture revenue.',
-      allowedTools: ['qualify_opportunity', 'approve_deal_structure', 'manage_pipeline'],
-      maxParallelTasks: 5,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000011',
-    agentCode: 'BIZ-PART',
-    displayName: 'PartnershipSourcingBot',
-    departmentId: 'business_development',
-    jobTitle: 'Strategic Partnership Sourcing Specialist',
-    level: 'SPECIALIST',
-    roleDescription: 'Identifies prospective enterprise partners, conducts synergy evaluations, and prepares partnership briefs.',
-    supervisor: {
+    'You are the Director of Business Development. You drive enterprise client acquisition, strategic partnerships, and new venture revenue.',
+    ['qualify_opportunity', 'approve_deal_structure', 'manage_pipeline'],
+    5
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000011',
+    'BIZ-PART',
+    'business_development',
+    'PartnershipSourcingBot',
+    'Strategic Partnership Sourcing Specialist',
+    'SPECIALIST',
+    'Identifies prospective enterprise partners, conducts synergy evaluations, and prepares partnership briefs.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000010',
       supervisorAgentCode: 'BIZ-DIR',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Research target technology platforms and consultancies',
       'Score strategic fit and potential partnership value',
       'Draft partnership memos and integration briefs',
     ],
-    requiredCapabilities: [
+    [
       'search_companies',
       'evaluate_fit',
       'draft_partnership_brief',
       'partnership_development',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '011',
       'Partnership Sourcing Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -770,44 +835,35 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.3,
-      systemPrompt: 'You are the Partnership Sourcing Specialist. You identify synergetic technology platforms and explore co-marketing or integration opportunities.',
-      allowedTools: ['search_companies', 'evaluate_fit', 'draft_partnership_brief'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000025',
-    agentCode: 'BIZ-PROP',
-    displayName: 'B2BProposalSpecialistBot',
-    departmentId: 'business_development',
-    jobTitle: 'B2B Deal Structuring & Proposal Specialist',
-    level: 'SPECIALIST',
-    roleDescription: 'Analyzes client RFPs, structures commercial terms, estimates project budgets, and drafts statements of work.',
-    supervisor: {
+    'You are the Partnership Sourcing Specialist. You identify synergetic technology platforms and explore co-marketing or integration opportunities.',
+    ['search_companies', 'evaluate_fit', 'draft_partnership_brief'],
+    3
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000025',
+    'BIZ-PROP',
+    'business_development',
+    'B2BProposalSpecialistBot',
+    'B2B Deal Structuring & Proposal Specialist',
+    'SPECIALIST',
+    'Analyzes client RFPs, structures commercial terms, estimates project budgets, and drafts statements of work.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000010',
       supervisorAgentCode: 'BIZ-DIR',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Deconstruct enterprise RFPs into deliverable scopes',
       'Prepare project pricing matrices and resource estimates',
       'Draft detailed Statements of Work (SOWs) for Director review',
     ],
-    requiredCapabilities: [
+    [
       'analyze_rfp',
       'structure_commercial_terms',
       'draft_sow',
       'contract_drafting',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '025',
       'B2B Proposal Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -816,95 +872,77 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.2,
-      systemPrompt: 'You are the B2B Proposal Specialist. You analyze client RFPs, structure commercial terms, and draft statements of work.',
-      allowedTools: ['analyze_rfp', 'structure_commercial_terms', 'draft_sow'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
+    'You are the B2B Proposal Specialist. You analyze client RFPs, structure commercial terms, and draft statements of work.',
+    ['analyze_rfp', 'structure_commercial_terms', 'draft_sow'],
+    3
+  ),
 
   // =========================================================================
   // 5. Marketing & Growth (3 agents)
   // =========================================================================
-  {
-    id: '00000000-0000-0000-0000-000000000012',
-    agentCode: 'MKT-DIR',
-    displayName: 'MarketingDirector',
-    departmentId: 'marketing_growth',
-    jobTitle: 'Director of Marketing & Growth',
-    level: 'DIRECTOR',
-    roleDescription: 'Directs brand positioning, marketing funnels, multi-channel distribution strategy, and content approval.',
-    supervisor: {
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000012',
+    'MKT-DIR',
+    'marketing_growth',
+    'MarketingDirector',
+    'Director of Marketing & Growth',
+    'DIRECTOR',
+    'Directs brand positioning, marketing funnels, multi-channel distribution strategy, and content approval.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000001',
       supervisorAgentCode: 'EXEC-CEO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Oversee brand voice and messaging consistency',
       'Approve marketing campaigns and distribution strategies',
       'Analyze growth conversion metrics and campaign ROI',
     ],
-    requiredCapabilities: [
+    [
       'approve_campaign',
       'review_copy',
       'analyze_metrics',
       'content_strategy',
       'campaign_management',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '012',
       'Marketing Director Profile',
       'DEPARTMENT_SCOPED',
-      ['marketing:*', 'campaign:*', 'brand:*', 'task:delegate'],
+      ['marketing:approve', 'campaign:review', 'brand:govern', 'task:delegate'],
       12000,
       3,
       true
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.3,
-      systemPrompt: 'You are the Director of Marketing & Growth. You direct brand positioning, audience funnels, and corporate communications.',
-      allowedTools: ['approve_campaign', 'review_copy', 'analyze_metrics'],
-      maxParallelTasks: 5,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000013',
-    agentCode: 'MKT-CONT',
-    displayName: 'ContentStrategistBot',
-    departmentId: 'marketing_growth',
-    jobTitle: 'Content Strategist & Copywriter',
-    level: 'SPECIALIST',
-    roleDescription: 'Drafts technical articles, thought leadership threads, educational posts, and SEO-optimized copy.',
-    supervisor: {
+    'You are the Director of Marketing & Growth. You direct brand positioning, audience funnels, and corporate communications.',
+    ['approve_campaign', 'review_copy', 'analyze_metrics'],
+    5
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000013',
+    'MKT-CONT',
+    'marketing_growth',
+    'ContentStrategistBot',
+    'Content Strategist & Copywriter',
+    'SPECIALIST',
+    'Drafts technical articles, thought leadership threads, educational posts, and SEO-optimized copy.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000012',
       supervisorAgentCode: 'MKT-DIR',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Draft in-depth technical blogs and research summaries',
       'Craft high-authority social media threads',
       'Perform keyword research and SEO content optimization',
     ],
-    requiredCapabilities: [
+    [
       'draft_article',
       'create_thread',
       'optimize_seo',
       'brand_monitoring',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '013',
       'Content Strategist Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -913,44 +951,35 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.4,
-      systemPrompt: 'You are the Content Strategist. You draft high-authority articles, technical announcements, and social content.',
-      allowedTools: ['draft_article', 'create_thread', 'optimize_seo'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000026',
-    agentCode: 'MKT-SOC',
-    displayName: 'SocialMediaSpecialistBot',
-    departmentId: 'marketing_growth',
-    jobTitle: 'Social Media & Omnichannel Distribution Specialist',
-    level: 'SPECIALIST',
-    roleDescription: 'Schedules and manages content distribution across channels, monitors brand mentions, and analyzes audience engagement.',
-    supervisor: {
+    'You are the Content Strategist. You draft high-authority articles, technical announcements, and social content.',
+    ['draft_article', 'create_thread', 'optimize_seo'],
+    3
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000026',
+    'MKT-SOC',
+    'marketing_growth',
+    'SocialMediaSpecialistBot',
+    'Social Media & Omnichannel Distribution Specialist',
+    'SPECIALIST',
+    'Schedules and manages content distribution across channels, monitors brand mentions, and analyzes audience engagement.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000012',
       supervisorAgentCode: 'MKT-DIR',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Prepare distribution schedules for marketing content',
       'Track engagement analytics and audience growth across channels',
       'Monitor brand sentiment and social discussions',
     ],
-    requiredCapabilities: [
+    [
       'schedule_distribution',
       'track_engagement',
       'monitor_brand_sentiment',
       'social_distribution',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '026',
       'Social Media Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -959,141 +988,114 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.3,
-      systemPrompt: 'You are the Social Media Specialist. You organize distribution schedules, analyze user engagement, and monitor brand sentiment.',
-      allowedTools: ['schedule_distribution', 'track_engagement', 'monitor_brand_sentiment'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
+    'You are the Social Media Specialist. You organize distribution schedules, analyze user engagement, and monitor brand sentiment.',
+    ['schedule_distribution', 'track_engagement', 'monitor_brand_sentiment'],
+    3
+  ),
 
   // =========================================================================
   // 6. Operations & Administration (3 agents)
   // =========================================================================
-  {
-    id: '00000000-0000-0000-0000-000000000014',
-    agentCode: 'OPS-DIR',
-    displayName: 'OperationsDirector',
-    departmentId: 'operations_administration',
-    jobTitle: 'Director of Operations & Administration',
-    level: 'DIRECTOR',
-    roleDescription: 'Orchestrates corporate background automations, audits internal processes, coordinates task schedules, and enforces compliance.',
-    supervisor: {
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000014',
+    'OPS-DIR',
+    'operations_administration',
+    'OperationsDirector',
+    'Director of Operations & Administration',
+    'DIRECTOR',
+    'Orchestrates corporate background automations, audits internal processes, coordinates task schedules, and enforces compliance.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000002', // Reports to COO
       supervisorAgentCode: 'EXEC-COO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Oversee corporate workflow automation and scheduling',
       'Enforce operational compliance and audit routines',
       'Coordinate administrative resources and log retention policies',
     ],
-    requiredCapabilities: [
+    [
       'audit_process',
       'schedule_automation',
       'manage_resources',
       'workflow_orchestration',
       'compliance_monitoring',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '014',
       'Operations Director Profile',
       'DEPARTMENT_SCOPED',
-      ['ops:*', 'cron:*', 'compliance:*', 'task:delegate'],
+      ['ops:audit', 'cron:manage', 'compliance:enforce', 'task:delegate'],
       8000,
       3,
       true
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.2,
-      systemPrompt: 'You are the Director of Operations. You orchestrate corporate workflows, regulatory compliance, and scheduling.',
-      allowedTools: ['audit_process', 'schedule_automation', 'manage_resources'],
-      maxParallelTasks: 5,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000015',
-    agentCode: 'OPS-COORD',
-    displayName: 'WorkflowCoordinator',
-    departmentId: 'operations_administration',
-    jobTitle: 'Workflow Orchestration & Scheduling Coordinator',
-    level: 'SPECIALIST',
-    roleDescription: 'Coordinates automated background tasks, schedules recurring crons, and tracks task execution SLAs.',
-    supervisor: {
+    'You are the Director of Operations. You orchestrate corporate workflows, regulatory compliance, and scheduling.',
+    ['audit_process', 'schedule_automation', 'manage_resources'],
+    5
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000015',
+    'OPS-COORD',
+    'operations_administration',
+    'WorkflowCoordinator',
+    'Workflow Orchestration & Scheduling Coordinator',
+    'SPECIALIST',
+    'Coordinates automated background tasks, schedules recurring crons, and tracks task execution SLAs.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000014',
       supervisorAgentCode: 'OPS-DIR',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Monitor scheduled background jobs and recurring automations',
       'Track task turnaround cycle times and SLA thresholds',
       'Archive audit logs and operational execution traces',
     ],
-    requiredCapabilities: [
+    [
       'track_sla',
       'trigger_cron',
       'archive_logs',
       'process_automation',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '015',
       'Workflow Coordinator Specialist Profile',
       'SPECIALIST_LOCAL',
-      ['cron:manage', 'sla:track', 'log:archive'],
+      ['cron:trigger', 'sla:track', 'log:archive'],
       0,
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.2,
-      systemPrompt: 'You coordinate automated background tasks and monitor execution SLAs across departments.',
-      allowedTools: ['track_sla', 'trigger_cron', 'archive_logs'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000027',
-    agentCode: 'OPS-COMP',
-    displayName: 'ComplianceAuditorBot',
-    departmentId: 'operations_administration',
-    jobTitle: 'Compliance & Operational Process Auditor',
-    level: 'SPECIALIST',
-    roleDescription: 'Audits business operations against statutory and empire governance rules, inspecting task logs and execution records.',
-    supervisor: {
+    'You coordinate automated background tasks and monitor execution SLAs across departments.',
+    ['track_sla', 'trigger_cron', 'archive_logs'],
+    3
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000027',
+    'OPS-COMP',
+    'operations_administration',
+    'ComplianceAuditorBot',
+    'Compliance & Operational Process Auditor',
+    'SPECIALIST',
+    'Audits business operations against statutory and empire governance rules, inspecting task logs and execution records.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000014',
       supervisorAgentCode: 'OPS-DIR',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Conduct regular audits of agent task executions against policies',
       'Verify that restricted actions strictly adhered to approval gates',
       'Flag operational non-compliance incidents to Operations Director',
     ],
-    requiredCapabilities: [
+    [
       'audit_compliance',
       'verify_process_standards',
       'inspect_audit_trail',
       'compliance_monitoring',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '027',
       'Compliance Auditor Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -1102,95 +1104,77 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.1,
-      systemPrompt: 'You are the Compliance Auditor. You audit corporate processes, verify policy adherence, and flag governance violations.',
-      allowedTools: ['audit_compliance', 'verify_process_standards', 'inspect_audit_trail'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
+    'You are the Compliance Auditor. You audit corporate processes, verify policy adherence, and flag governance violations.',
+    ['audit_compliance', 'verify_process_standards', 'inspect_audit_trail'],
+    3
+  ),
 
   // =========================================================================
   // 7. Opportunity Acquisition (4 agents)
   // =========================================================================
-  {
-    id: '00000000-0000-0000-0000-000000000016',
-    agentCode: 'OPP-DIR',
-    displayName: 'OpportunityDirector',
-    departmentId: 'opportunity_acquisition',
-    jobTitle: 'Director of Opportunity Acquisition',
-    level: 'DIRECTOR',
-    roleDescription: 'Directs dual-track acquisition engine: Track A (Owner high-paying remote roles) and Track B (Empire enterprise clients, bounties, grants).',
-    supervisor: {
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000016',
+    'OPP-DIR',
+    'opportunity_acquisition',
+    'OpportunityDirector',
+    'Director of Opportunity Acquisition',
+    'DIRECTOR',
+    'Directs dual-track acquisition engine: Track A (Owner high-paying remote roles) and Track B (Empire enterprise clients, bounties, grants).',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000001',
       supervisorAgentCode: 'EXEC-CEO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Oversee Track A (Owner opportunities) and Track B (Empire opportunities)',
       'Review lead quality and conversion effectiveness',
       'Approve outbound outreach campaigns before submitting to Owner gate',
     ],
-    requiredCapabilities: [
+    [
       'review_lead_quality',
       'approve_outreach_campaign',
       'monitor_conversion',
       'job_market_scraping',
       'lead_generation',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '016',
       'Opportunity Acquisition Director Profile',
       'DEPARTMENT_SCOPED',
-      ['opp:*', 'lead:*', 'job:*', 'outreach:*', 'task:delegate'],
+      ['opp:review', 'lead:approve', 'outreach:approve_campaign', 'task:delegate'],
       10000,
       3,
       true
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.3,
-      systemPrompt: 'You are the Director of Opportunity Acquisition. You lead Track A (Owner career & contracts) and Track B (Empire enterprise leads).',
-      allowedTools: ['review_lead_quality', 'approve_outreach_campaign', 'monitor_conversion'],
-      maxParallelTasks: 5,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000017',
-    agentCode: 'OPP-SCOUT',
-    displayName: 'OwnerJobScoutBot',
-    departmentId: 'opportunity_acquisition',
-    jobTitle: 'Owner Career & Job Scout Specialist (Track A)',
-    level: 'SPECIALIST',
-    roleDescription: 'Scans global job boards for high-paying remote engineering, Web3, Rust, AI, and systems roles tailored to Stephen Mendez.',
-    supervisor: {
+    'You are the Director of Opportunity Acquisition. You lead Track A (Owner career & contracts) and Track B (Empire enterprise leads).',
+    ['review_lead_quality', 'approve_outreach_campaign', 'monitor_conversion'],
+    5
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000017',
+    'OPP-SCOUT',
+    'opportunity_acquisition',
+    'OwnerJobScoutBot',
+    'Owner Career & Job Scout Specialist (Track A)',
+    'SPECIALIST',
+    'Scans global job boards for high-paying remote engineering, Web3, Rust, AI, and systems roles tailored to Stephen Mendez.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000016',
       supervisorAgentCode: 'OPP-DIR',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Continuously scan remote job boards (Greenhouse, Lever, LinkedIn, Web3 boards)',
       'Filter roles matching compensation thresholds and tech stack criteria',
       'Extract hiring manager contacts and company context',
     ],
-    requiredCapabilities: [
+    [
       'scan_job_boards',
       'filter_by_compensation',
       'extract_hiring_manager',
       'job_market_scraping',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '017',
       'Owner Job Scout Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -1199,44 +1183,35 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.2,
-      systemPrompt: 'You are the Owner Job Scout. You search for high-paying remote roles in Rust, Web3, Python, and AI engineering for Stephen Mendez.',
-      allowedTools: ['scan_job_boards', 'filter_by_compensation', 'extract_hiring_manager'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000018',
-    agentCode: 'OPP-OUTR',
-    displayName: 'OwnerOutreachPreparerBot',
-    departmentId: 'opportunity_acquisition',
-    jobTitle: 'Owner Outreach & Application Preparer (Track A)',
-    level: 'SPECIALIST',
-    roleDescription: 'Drafts highly customized resumes, cover letters, and outreach emails for Owner. Autonomous sending is strictly barred pending Owner sign-off.',
-    supervisor: {
+    'You are the Owner Job Scout. You search for high-paying remote roles in Rust, Web3, Python, and AI engineering for Stephen Mendez.',
+    ['scan_job_boards', 'filter_by_compensation', 'extract_hiring_manager'],
+    3
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000018',
+    'OPP-OUTR',
+    'opportunity_acquisition',
+    'OwnerOutreachPreparerBot',
+    'Owner Outreach & Application Preparer (Track A)',
+    'SPECIALIST',
+    'Drafts highly customized resumes, cover letters, and outreach emails for Owner. Autonomous sending is strictly barred pending Owner sign-off.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000016',
       supervisorAgentCode: 'OPP-DIR',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Generate tailored resumes and cover letters matching job descriptions',
       'Draft concise, personalized hiring manager cold emails',
       'Quarantine drafts in WAITING_FEEDBACK state for Owner approval',
     ],
-    requiredCapabilities: [
+    [
       'draft_cover_letter',
       'personalize_email',
       'queue_for_approval',
       'outreach_drafting',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '018',
       'Owner Outreach Preparer Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -1245,44 +1220,35 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.3,
-      systemPrompt: 'You draft tailored resumes, cover letters, and cold outreach emails. Consequential sending is blocked pending Owner approval.',
-      allowedTools: ['draft_cover_letter', 'personalize_email', 'queue_for_approval'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000019',
-    agentCode: 'OPP-LEAD',
-    displayName: 'EnterpriseLeadGenBot',
-    departmentId: 'opportunity_acquisition',
-    jobTitle: 'Enterprise Lead Generation Specialist (Track B)',
-    level: 'SPECIALIST',
-    roleDescription: 'Discovers commercial startups and enterprises requiring AI automation, software engineering, or consulting services.',
-    supervisor: {
+    'You draft tailored resumes, cover letters, and cold outreach emails. Consequential sending is blocked pending Owner approval.',
+    ['draft_cover_letter', 'personalize_email', 'queue_for_approval'],
+    3
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000019',
+    'OPP-LEAD',
+    'opportunity_acquisition',
+    'EnterpriseLeadGenBot',
+    'Enterprise Lead Generation Specialist (Track B)',
+    'SPECIALIST',
+    'Discovers commercial startups and enterprises requiring AI automation, software engineering, or consulting services.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000016',
       supervisorAgentCode: 'OPP-DIR',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Discover business leads, developer bounties, and startup grants',
       'Enrich prospect company data with tech stack and executive info',
       'Draft tailored B2B service pitch proposals for Director review',
     ],
-    requiredCapabilities: [
+    [
       'discover_leads',
       'enrich_company_data',
       'draft_b2b_proposal',
       'bounty_hunting',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '019',
       'Enterprise Lead Gen Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -1291,94 +1257,76 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.3,
-      systemPrompt: 'You identify startups and businesses needing autonomous AI or software engineering consulting.',
-      allowedTools: ['discover_leads', 'enrich_company_data', 'draft_b2b_proposal'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
+    'You identify startups and businesses needing autonomous AI or software engineering consulting.',
+    ['discover_leads', 'enrich_company_data', 'draft_b2b_proposal'],
+    3
+  ),
 
   // =========================================================================
   // 8. Research & Intelligence (3 agents)
   // =========================================================================
-  {
-    id: '00000000-0000-0000-0000-000000000020',
-    agentCode: 'RES-DIR',
-    displayName: 'ResearchDirector',
-    departmentId: 'research_intelligence',
-    jobTitle: 'Director of Research & Intelligence',
-    level: 'DIRECTOR',
-    roleDescription: 'Synthesizes market signals, competitive data, and macro indicators into high-impact strategic intelligence briefings.',
-    supervisor: {
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000020',
+    'RES-DIR',
+    'research_intelligence',
+    'ResearchDirector',
+    'Director of Research & Intelligence',
+    'DIRECTOR',
+    'Synthesizes market signals, competitive data, and macro indicators into high-impact strategic intelligence briefings.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000001',
       supervisorAgentCode: 'EXEC-CEO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Commission in-depth market and technology research studies',
       'Validate analytical hypotheses and cross-check evidence',
       'Publish executive intelligence dossiers for leadership',
     ],
-    requiredCapabilities: [
+    [
       'commission_research',
       'validate_hypothesis',
       'publish_intelligence_dossier',
       'market_forecasting',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '020',
       'Research Director Profile',
       'DEPARTMENT_SCOPED',
-      ['research:*', 'intelligence:*', 'dossier:*', 'task:delegate'],
+      ['research:commission', 'research:publish', 'intelligence:compile', 'task:delegate'],
       7000,
       3,
       true
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.2,
-      systemPrompt: 'You are the Director of Research & Intelligence. You synthesize market signals into strategic intelligence briefings.',
-      allowedTools: ['commission_research', 'validate_hypothesis', 'publish_intelligence_dossier'],
-      maxParallelTasks: 5,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000021',
-    agentCode: 'RES-FORE',
-    displayName: 'MarketForecasterBot',
-    departmentId: 'research_intelligence',
-    jobTitle: 'Macroeconomic & Market Trend Forecaster',
-    level: 'SPECIALIST',
-    roleDescription: 'Tracks global macroeconomic indicators, interest rates, AI sector developments, and statistical trends.',
-    supervisor: {
+    'You are the Director of Research & Intelligence. You synthesize market signals into strategic intelligence briefings.',
+    ['commission_research', 'validate_hypothesis', 'publish_intelligence_dossier'],
+    5
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000021',
+    'RES-FORE',
+    'research_intelligence',
+    'MarketForecasterBot',
+    'Macroeconomic & Market Trend Forecaster',
+    'SPECIALIST',
+    'Tracks global macroeconomic indicators, interest rates, AI sector developments, and statistical trends.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000020',
       supervisorAgentCode: 'RES-DIR',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Aggregate macroeconomic and industry statistical data',
       'Model trend projections and sentiment shifts',
       'Generate weekly macro trend briefing summaries',
     ],
-    requiredCapabilities: [
+    [
       'gather_macro_data',
       'forecast_trends',
       'generate_summary',
       'sentiment_analysis',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '021',
       'Market Forecaster Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -1387,44 +1335,35 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.2,
-      systemPrompt: 'You track macroeconomic trends, interest rates, and AI industry developments.',
-      allowedTools: ['gather_macro_data', 'forecast_trends', 'generate_summary'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000028',
-    agentCode: 'RES-COMP',
-    displayName: 'CompetitiveAnalystBot',
-    departmentId: 'research_intelligence',
-    jobTitle: 'Competitive Intelligence & Tokenomics Analyst',
-    level: 'SPECIALIST',
-    roleDescription: 'Benchmarks competitive autonomous AI frameworks, analyzes crypto tokenomics, and monitors technological disruptions.',
-    supervisor: {
+    'You track macroeconomic trends, interest rates, and AI industry developments.',
+    ['gather_macro_data', 'forecast_trends', 'generate_summary'],
+    3
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000028',
+    'RES-COMP',
+    'research_intelligence',
+    'CompetitiveAnalystBot',
+    'Competitive Intelligence & Tokenomics Analyst',
+    'SPECIALIST',
+    'Benchmarks competitive autonomous AI frameworks, analyzes crypto tokenomics, and monitors technological disruptions.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000020',
       supervisorAgentCode: 'RES-DIR',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Perform feature, architecture, and pricing benchmarks of competitors',
       'Analyze tokenomic supply models and staking incentives',
       'Compile rapid-response competitive intelligence briefs',
     ],
-    requiredCapabilities: [
+    [
       'benchmark_competitors',
       'analyze_tokenomics',
       'compile_competitive_brief',
       'competitive_benchmarking',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '028',
       'Competitive Analyst Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -1433,95 +1372,77 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.2,
-      systemPrompt: 'You are the Competitive Intelligence Analyst. You benchmark industry competitors, inspect tokenomics, and analyze technological shifts.',
-      allowedTools: ['benchmark_competitors', 'analyze_tokenomics', 'compile_competitive_brief'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
+    'You are the Competitive Intelligence Analyst. You benchmark industry competitors, inspect tokenomics, and analyze technological shifts.',
+    ['benchmark_competitors', 'analyze_tokenomics', 'compile_competitive_brief'],
+    3
+  ),
 
   // =========================================================================
   // 9. Security & Governance (3 agents)
   // =========================================================================
-  {
-    id: '00000000-0000-0000-0000-000000000022',
-    agentCode: 'SEC-CISO',
-    displayName: 'ChiefSecurityDirector',
-    departmentId: 'security_governance',
-    jobTitle: 'Chief Information Security Officer (CISO) & Director of Security',
-    level: 'DIRECTOR',
-    roleDescription: 'Maintains the 4-tier emergency shutdown system, credential vault isolation, RBAC/ABAC enforcement, and corporate security boundaries.',
-    supervisor: {
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000022',
+    'SEC-CISO',
+    'security_governance',
+    'ChiefSecurityDirector',
+    'Chief Information Security Officer (CISO) & Director of Security',
+    'DIRECTOR',
+    'Maintains the 4-tier emergency shutdown system, credential vault isolation, RBAC/ABAC enforcement, and corporate security boundaries.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000001',
       supervisorAgentCode: 'EXEC-CEO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Monitor and trigger multi-tier emergency circuit breakers',
       'Enforce RBAC/ABAC boundary policies across all services',
       'Audit token integrity, cryptographic signatures, and credentials',
     ],
-    requiredCapabilities: [
+    [
       'trigger_emergency_halt',
       'audit_permissions',
       'verify_token_integrity',
       'circuit_breaker_control',
       'access_governance',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '022',
       'CISO Security Director Profile',
       'DEPARTMENT_SCOPED',
-      ['security:*', 'circuit_breaker:*', 'auth:*', 'task:delegate'],
+      ['security:trigger_halt', 'security:audit_permissions', 'security:verify_token', 'task:delegate'],
       15000,
       3,
       true
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.1,
-      systemPrompt: 'You are the Chief Information Security Officer (CISO). You hold the authority to trigger multi-tier emergency halt and enforce security boundaries.',
-      allowedTools: ['trigger_emergency_halt', 'audit_permissions', 'verify_token_integrity'],
-      maxParallelTasks: 5,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000029',
-    agentCode: 'SEC-IAM',
-    displayName: 'IdentityAccessSentinelBot',
-    departmentId: 'security_governance',
-    jobTitle: 'Identity, Access & Vault Governance Sentinel',
-    level: 'SPECIALIST',
-    roleDescription: 'Verifies agent caller contexts, checks permission profiles against action attempts, and monitors credential vaults.',
-    supervisor: {
+    'You are the Chief Information Security Officer (CISO). You hold the authority to trigger multi-tier emergency halt and enforce security boundaries.',
+    ['trigger_emergency_halt', 'audit_permissions', 'verify_token_integrity'],
+    5
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000029',
+    'SEC-IAM',
+    'security_governance',
+    'IdentityAccessSentinelBot',
+    'Identity, Access & Vault Governance Sentinel',
+    'SPECIALIST',
+    'Verifies agent caller contexts, checks permission profiles against action attempts, and monitors credential vaults.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000022',
       supervisorAgentCode: 'SEC-CISO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Inspect caller authentication contexts and token signatures',
       'Detect and block unauthorized permission elevation attempts',
       'Audit cryptographic secret access and credential vault interactions',
     ],
-    requiredCapabilities: [
+    [
       'verify_token_integrity',
       'audit_rbac_permissions',
       'inspect_vault_access',
       'access_governance',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '029',
       'IAM Sentinel Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -1530,44 +1451,35 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.1,
-      systemPrompt: 'You are the Identity and Access Governance Sentinel. You verify caller identities, audit permission boundaries, and prevent privilege escalation.',
-      allowedTools: ['verify_token_integrity', 'audit_rbac_permissions', 'inspect_vault_access'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
-  {
-    id: '00000000-0000-0000-0000-000000000030',
-    agentCode: 'SEC-AUD',
-    displayName: 'SecurityAuditSentinelBot',
-    departmentId: 'security_governance',
-    jobTitle: 'Security Audit Trail & Incident Sentinel',
-    level: 'SPECIALIST',
-    roleDescription: 'Continuously monitors system audit event streams, validates cryptographic hash chaining, and detects tampering or anomalies.',
-    supervisor: {
+    'You are the Identity and Access Governance Sentinel. You verify caller identities, audit permission boundaries, and prevent privilege escalation.',
+    ['verify_token_integrity', 'audit_rbac_permissions', 'inspect_vault_access'],
+    3
+  ),
+  createFoundingAgent(
+    '00000000-0000-0000-0000-000000000030',
+    'SEC-AUD',
+    'security_governance',
+    'SecurityAuditSentinelBot',
+    'Security Audit Trail & Incident Sentinel',
+    'SPECIALIST',
+    'Continuously monitors system audit event streams, validates cryptographic hash chaining, and detects tampering or anomalies.',
+    {
       supervisorAgentId: '00000000-0000-0000-0000-000000000022',
       supervisorAgentCode: 'SEC-CISO',
       reportsToOwner: false,
     },
-    assignedResponsibilities: [
+    [
       'Verify cryptographic integrity of audit and journal records',
       'Scan event streams for anomalous execution patterns',
       'Trigger security escalation events upon detecting anomalous mutations',
     ],
-    requiredCapabilities: [
+    [
       'monitor_security_events',
       'detect_anomalies',
       'validate_audit_log_hashes',
       'security_audit',
     ],
-    permissionProfile: buildPermissionProfile(
+    buildPermissionProfile(
       '030',
       'Security Audit Sentinel Specialist Profile',
       'SPECIALIST_LOCAL',
@@ -1576,19 +1488,10 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
       0,
       false
     ),
-    operationalStatus: 'ACTIVE',
-    modelConfig: {
-      modelProvider: 'mock',
-      modelId: 'mock-llm-v1',
-      temperature: 0.1,
-      systemPrompt: 'You are the Security Audit Trail Sentinel. You monitor event logs, verify hash chains, and detect tampering attempts in real time.',
-      allowedTools: ['monitor_security_events', 'detect_anomalies', 'validate_audit_log_hashes'],
-      maxParallelTasks: 3,
-      timeoutMs: 60000,
-    },
-    createdAt: '2026-01-01T00:00:00.000Z',
-    configVersion: '1.0.0',
-  },
+    'You are the Security Audit Trail Sentinel. You monitor event logs, verify hash chains, and detect tampering attempts in real time.',
+    ['monitor_security_events', 'detect_anomalies', 'validate_audit_log_hashes'],
+    3
+  ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1596,23 +1499,23 @@ export const CANONICAL_FOUNDING_AGENTS: AgentIdentity[] = [
 // ---------------------------------------------------------------------------
 
 /**
- * Finds an agent identity by immutable UUID
+ * Finds an agent identity/record by immutable UUID
  */
-export function findAgentById(id: string): AgentIdentity | undefined {
+export function findAgentById(id: string): AgentRecord | undefined {
   return CANONICAL_FOUNDING_AGENTS.find((a) => a.id === id);
 }
 
 /**
- * Finds an agent identity by unique uppercase Agent Code
+ * Finds an agent identity/record by unique uppercase Agent Code
  */
-export function findAgentByCode(code: string): AgentIdentity | undefined {
+export function findAgentByCode(code: string): AgentRecord | undefined {
   return CANONICAL_FOUNDING_AGENTS.find((a) => a.agentCode === code);
 }
 
 /**
  * Returns all active agents belonging to a department
  */
-export function getDepartmentAgents(deptId: DepartmentId): AgentIdentity[] {
+export function getDepartmentAgents(deptId: DepartmentId): AgentRecord[] {
   return CANONICAL_FOUNDING_AGENTS.filter(
     (a) => a.departmentId === deptId && a.operationalStatus === 'ACTIVE'
   );
@@ -1621,30 +1524,37 @@ export function getDepartmentAgents(deptId: DepartmentId): AgentIdentity[] {
 /**
  * Finds the appointed Director of a department
  */
-export function getDepartmentDirector(deptId: DepartmentId): AgentIdentity | undefined {
+export function getDepartmentDirector(deptId: DepartmentId): AgentRecord | undefined {
   return CANONICAL_FOUNDING_AGENTS.find(
     (a) => a.departmentId === deptId && a.level === 'DIRECTOR' && a.operationalStatus === 'ACTIVE'
   );
 }
 
 /**
- * Exhaustive hierarchy validator.
- * Checks for:
+ * Exhaustive organizational registry validator.
+ * Validates:
  * 1. Exactly 30 agents across 9 departments
  * 2. Uniqueness of all UUIDs and Agent Codes
- * 3. Supervisor reference validity
- * 4. Seniority rules (supervisor cannot be less senior than supervisee)
- * 5. Detection of circular reporting chains (cycles)
+ * 3. Invalid department references
+ * 4. Missing directors: Every department has an active Director or Executive assigned
+ * 5. Missing supervisors: Non-CEO agents must have a valid supervisor
+ * 6. Non-existent supervisor references
+ * 7. Self-reporting: Agent reporting to itself
+ * 8. Circular reporting chains: Acyclic hierarchy guarantee
+ * 9. Seniority violations: Supervisors must be senior or equal
+ * 10. Prohibited Owner-level permission assignments
+ * 11. CEO reporting: CEO must report directly to Owner (reportsToOwner: true, supervisorAgentId: null)
  */
-export function validateWorkforceHierarchy(agents: AgentIdentity[] = CANONICAL_FOUNDING_AGENTS): {
-  valid: boolean;
-  errors: string[];
-} {
+export function validateOrganizationalRegistry(
+  agents: AgentRecord[] = CANONICAL_FOUNDING_AGENTS,
+  departments: Department[] = CANONICAL_DEPARTMENTS
+): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
-  const idMap = new Map<string, AgentIdentity>();
-  const codeMap = new Map<string, AgentIdentity>();
+  const idMap = new Map<string, AgentRecord>();
+  const codeMap = new Map<string, AgentRecord>();
+  const validDeptIds = new Set(departments.map((d) => d.id));
 
-  // 1. Uniqueness check
+  // 1. Uniqueness of IDs and Codes & Department Validity
   for (const agent of agents) {
     if (idMap.has(agent.id)) {
       errors.push(`Duplicate agent ID detected: ${agent.id}`);
@@ -1657,24 +1567,54 @@ export function validateWorkforceHierarchy(agents: AgentIdentity[] = CANONICAL_F
     } else {
       codeMap.set(agent.agentCode, agent);
     }
+
+    // Invalid department reference
+    if (!validDeptIds.has(agent.departmentId)) {
+      errors.push(`Agent ${agent.agentCode} references invalid department: '${agent.departmentId}'`);
+    }
+
+    // Prohibited Owner-level permission assignment check
+    const profileCheck = assertNonOwnerProfileValid(agent.permissionProfile);
+    if (!profileCheck.valid) {
+      errors.push(`Agent ${agent.agentCode} has invalid permission profile: ${profileCheck.errors.join('; ')}`);
+    }
   }
 
-  // 2. Supervisor resolution & Seniority check
+  // 2. Department Director Assignment Check
+  for (const dept of departments) {
+    const director = agents.find(
+      (a) => a.departmentId === dept.id && (a.level === 'DIRECTOR' || a.level === 'EXECUTIVE') && a.operationalStatus === 'ACTIVE'
+    );
+    if (!director) {
+      errors.push(`Department '${dept.id}' has no active Director or Executive assigned`);
+    }
+  }
+
+  // 3. Supervisor Resolution, Seniority & Self-Reporting Check
   for (const agent of agents) {
+    // CEO reporting check
     if (agent.supervisor.reportsToOwner) {
       if (agent.supervisor.supervisorAgentId !== null) {
-        errors.push(`Agent ${agent.agentCode} reports to Owner, supervisorAgentId must be null`);
+        errors.push(`Agent ${agent.agentCode} reports to Owner; supervisorAgentId must be null`);
       }
       continue;
     }
 
     const supId = agent.supervisor.supervisorAgentId;
+    // Missing supervisor check
     if (!supId) {
-      errors.push(`Agent ${agent.agentCode} must have a supervisorAgentId or reportsToOwner=true`);
+      errors.push(`Agent ${agent.agentCode} has missing supervisor (must set supervisorAgentId or reportsToOwner=true)`);
+      continue;
+    }
+
+    // Self-reporting check
+    if (supId === agent.id) {
+      errors.push(`Self-reporting prohibited: Agent ${agent.agentCode} (${agent.id}) reports to itself`);
       continue;
     }
 
     const supervisor = idMap.get(supId);
+    // Non-existent supervisor reference check
     if (!supervisor) {
       errors.push(`Agent ${agent.agentCode} references non-existent supervisor ID: ${supId}`);
       continue;
@@ -1688,10 +1628,10 @@ export function validateWorkforceHierarchy(agents: AgentIdentity[] = CANONICAL_F
     }
   }
 
-  // 3. Circular reporting chain detection (Cycle detection)
+  // 4. Circular Reporting Chain Detection (Cycles)
   for (const agent of agents) {
     const visited = new Set<string>();
-    let current: AgentIdentity | undefined = agent;
+    let current: AgentRecord | undefined = agent;
 
     while (current && current.supervisor.supervisorAgentId) {
       if (visited.has(current.id)) {
@@ -1708,3 +1648,8 @@ export function validateWorkforceHierarchy(agents: AgentIdentity[] = CANONICAL_F
     errors,
   };
 }
+
+/**
+ * Backward compatibility alias for validateOrganizationalRegistry
+ */
+export const validateWorkforceHierarchy = validateOrganizationalRegistry;

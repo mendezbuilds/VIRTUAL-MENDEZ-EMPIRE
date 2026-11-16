@@ -7,12 +7,19 @@ import {
   OrganizationalLevelSchema,
   compareOrganizationalLevels,
   isLevelSeniorOrEqual,
+  TreasurySpendingControlSchema,
+  CANONICAL_TREASURY_CONTROLS,
+  verifyDepartmentSpendingAuthorization,
   AgentIdentitySchema,
+  AgentConfigurationSchema,
+  createAgentRecord,
+  updateAgentConfiguration,
   CANONICAL_FOUNDING_AGENTS,
   findAgentById,
   findAgentByCode,
   getDepartmentAgents,
   getDepartmentDirector,
+  validateOrganizationalRegistry,
   validateWorkforceHierarchy,
   toAgentSpec,
   AgentCodeSchema,
@@ -20,6 +27,8 @@ import {
   RestrictedActionTypeSchema,
   PermissionProfileSchema,
   CANONICAL_APPROVAL_REQUIREMENTS,
+  MANDATORY_PROHIBITED_FOR_ALL_AGENTS,
+  assertNonOwnerProfileValid,
   requiresOwnerGate,
   validateAgentAction,
   OwnerAuthorizationRequestSchema,
@@ -33,8 +42,13 @@ import {
   TaskEscalationSchema,
   CommunicationMessageTypeSchema,
   CommunicationEnvelopeSchema,
+  createVerifiedCommunicationEnvelope,
   validateCommunicationEnvelope,
+  validateMessagePayload,
   MessageAcknowledgmentSchema,
+  TaskAssignmentPayloadSchema,
+  TaskCompletionPayloadSchema,
+  FailureReportPayloadSchema,
   ExecutionContextSchema,
   FailureClassificationSchema,
   RetryPolicySchema,
@@ -45,15 +59,41 @@ import {
   CurrencyCodeSchema,
   StrategicObjectiveSchema,
   AgentMessageTypeSchema,
-  type AgentIdentity,
+  type AgentRecord,
+  type ExecutionContext,
 } from './index.js';
+
+// Helper to deep-clone the founding roster for anomaly injection tests
+function cloneFoundingRoster(): AgentRecord[] {
+  return CANONICAL_FOUNDING_AGENTS.map((a) =>
+    createAgentRecord(
+      { ...a.identity },
+      {
+        ...a.currentConfig,
+        supervisor: { ...a.currentConfig.supervisor },
+        assignedResponsibilities: [...a.currentConfig.assignedResponsibilities],
+        requiredCapabilities: [...a.currentConfig.requiredCapabilities],
+        permissionProfile: {
+          ...a.currentConfig.permissionProfile,
+          allowedPermissions: [...a.currentConfig.permissionProfile.allowedPermissions],
+          prohibitedRestrictedActions: [...a.currentConfig.permissionProfile.prohibitedRestrictedActions],
+          requiresOwnerAuthorizationFor: [...a.currentConfig.permissionProfile.requiresOwnerAuthorizationFor],
+        },
+        modelConfig: {
+          ...a.currentConfig.modelConfig,
+          allowedTools: [...a.currentConfig.modelConfig.allowedTools],
+        },
+      }
+    )
+  );
+}
 
 describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
   // =========================================================================
-  // 1. All Nine Department Definitions
+  // 1. Department Definitions & Canonical Structure (Point 1 & Point 5)
   // =========================================================================
-  describe('1. Department Definitions & Canonical Structure', () => {
-    it('verifies all 9 canonical corporate departments exist and validate against schema', () => {
+  describe('1. Department Definitions, Planning Allocations & Treasury Controls', () => {
+    it('verifies all 9 canonical corporate departments exist and match diagram counts', () => {
       expect(CANONICAL_DEPARTMENTS).toHaveLength(9);
 
       const expectedDepts = [
@@ -75,13 +115,54 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
 
       for (const dept of CANONICAL_DEPARTMENTS) {
         const parseResult = DepartmentSchema.safeParse(dept);
-        expect(parseResult.success, `Department ${dept.id} failed validation: ${JSON.stringify(parseResult)}`).toBe(true);
+        expect(parseResult.success, `Department ${dept.id} failed validation`).toBe(true);
+        expect(dept.budgetMonthlyAllocationUsd).toBeGreaterThan(0);
         expect(dept.budgetMonthlyUsd).toBeGreaterThan(0);
         expect(dept.allowedCapabilities.length).toBeGreaterThan(0);
         expect(dept.directorId).toBeDefined();
         expect(dept.directorCode).toBeDefined();
         expect(dept.isActive).toBe(true);
       }
+    });
+
+    it('enforces that department budgets are planning allocations, not automatic spending permissions', () => {
+      // 1. Spending within single transaction limit and authorized level succeeds
+      const normalSpend = verifyDepartmentSpendingAuthorization({
+        departmentId: 'technology_engineering',
+        amountUsd: 2500, // <= $5,000 single transaction limit
+        approverLevel: 'DIRECTOR',
+      });
+      expect(normalSpend.authorized).toBe(true);
+      expect(normalSpend.requiresOwnerAuthorization).toBe(false);
+
+      // 2. Spending above single transaction limit for non-Director fails
+      const specialistSpend = verifyDepartmentSpendingAuthorization({
+        departmentId: 'technology_engineering',
+        amountUsd: 6000,
+        approverLevel: 'SPECIALIST',
+      });
+      expect(specialistSpend.authorized).toBe(false);
+      expect(specialistSpend.reason).toContain('exceeds single transaction limit');
+
+      // 3. Spending above mandatory Owner threshold ($10,000 for Tech) requires explicit Owner authorization
+      const largeSpend = verifyDepartmentSpendingAuthorization({
+        departmentId: 'technology_engineering',
+        amountUsd: 12000,
+        approverLevel: 'DIRECTOR',
+        isOwnerApproved: false,
+      });
+      expect(largeSpend.authorized).toBe(false);
+      expect(largeSpend.requiresOwnerAuthorization).toBe(true);
+      expect(largeSpend.reason).toContain('exceeds Owner authorization threshold');
+
+      // 4. Large spend with Owner approval succeeds
+      const approvedLargeSpend = verifyDepartmentSpendingAuthorization({
+        departmentId: 'technology_engineering',
+        amountUsd: 12000,
+        approverLevel: 'DIRECTOR',
+        isOwnerApproved: true,
+      });
+      expect(approvedLargeSpend.authorized).toBe(true);
     });
 
     it('rejects invalid department IDs', () => {
@@ -92,22 +173,27 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
   });
 
   // =========================================================================
-  // 2. All 30 Founding Agent Identities
+  // 2. Immutable Identity vs. Mutable Configuration (Point 2)
   // =========================================================================
-  describe('2. Founding Agent Workforce Registry (30 AI Employees)', () => {
-    it('verifies the corporate workforce roster contains exactly 30 founding AI employee identities', () => {
+  describe('2. Separation of Immutable Agent Identity from Mutable Configuration', () => {
+    it('verifies the corporate workforce roster contains exactly 30 founding AI employee records', () => {
       expect(CANONICAL_FOUNDING_AGENTS).toHaveLength(30);
 
       for (const agent of CANONICAL_FOUNDING_AGENTS) {
-        const result = AgentIdentitySchema.safeParse(agent);
-        expect(
-          result.success,
-          `Agent ${agent.agentCode} failed validation: ${result.error?.message}`
-        ).toBe(true);
+        // Validate immutable identity partition
+        const idParse = AgentIdentitySchema.safeParse(agent.identity);
+        expect(idParse.success, `Identity for ${agent.agentCode} failed: ${idParse.error?.message}`).toBe(true);
+
+        // Validate mutable configuration partition
+        const configParse = AgentConfigurationSchema.safeParse(agent.currentConfig);
+        expect(configParse.success, `Config for ${agent.agentCode} failed: ${configParse.error?.message}`).toBe(true);
+
+        // Verify config references identity
+        expect(agent.currentConfig.agentId).toBe(agent.identity.id);
       }
     });
 
-    it('verifies agent distribution across all 9 departments conforms to target plan', () => {
+    it('verifies agent distribution across all 9 departments conforms to corrected diagram counts', () => {
       const counts: Record<string, number> = {};
       for (const agent of CANONICAL_FOUNDING_AGENTS) {
         counts[agent.departmentId] = (counts[agent.departmentId] || 0) + 1;
@@ -127,21 +213,38 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
       expect(total).toBe(30);
     });
 
-    it('verifies every agent has all mandatory attributes populated', () => {
-      for (const agent of CANONICAL_FOUNDING_AGENTS) {
-        expect(agent.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
-        expect(agent.agentCode).toMatch(/^[A-Z0-9]+-[A-Z0-9_]+$/);
-        expect(agent.displayName.length).toBeGreaterThan(0);
-        expect(agent.jobTitle.length).toBeGreaterThan(0);
-        expect(agent.roleDescription.length).toBeGreaterThan(0);
-        expect(agent.assignedResponsibilities.length).toBeGreaterThan(0);
-        expect(agent.requiredCapabilities.length).toBeGreaterThan(0);
-        expect(agent.permissionProfile).toBeDefined();
-        expect(agent.operationalStatus).toBe('ACTIVE');
-        expect(agent.configVersion).toBe('1.0.0');
-        expect(agent.createdAt).toBeDefined();
-        expect(agent.modelConfig.systemPrompt.length).toBeGreaterThan(0);
-      }
+    it('guarantees changing mutable configuration preserves permanent immutable identity and agent code', () => {
+      const originalAgent = findAgentByCode('TECH-FSE')!;
+      expect(originalAgent).toBeDefined();
+
+      const immutableId = originalAgent.identity.id;
+      const immutableCode = originalAgent.identity.agentCode;
+      const immutableDept = originalAgent.identity.departmentId;
+      const immutableCreatedAt = originalAgent.identity.createdAt;
+
+      // Update title, supervisor, responsibilities, and permissions
+      const promotedAgent = updateAgentConfiguration(originalAgent, {
+        jobTitle: 'Staff Full Stack Engineer & Tech Lead',
+        displayName: 'StaffFullStackEngineerBot',
+        assignedResponsibilities: [
+          ...originalAgent.assignedResponsibilities,
+          'Lead technical design reviews across engineering team',
+        ],
+      });
+
+      // Immutable identity partition MUST remain identical
+      expect(promotedAgent.identity.id).toBe(immutableId);
+      expect(promotedAgent.identity.agentCode).toBe(immutableCode);
+      expect(promotedAgent.identity.departmentId).toBe(immutableDept);
+      expect(promotedAgent.identity.createdAt).toBe(immutableCreatedAt);
+      expect(promotedAgent.id).toBe(immutableId);
+      expect(promotedAgent.agentCode).toBe(immutableCode);
+
+      // Mutable configuration partition MUST reflect updates
+      expect(promotedAgent.jobTitle).toBe('Staff Full Stack Engineer & Tech Lead');
+      expect(promotedAgent.displayName).toBe('StaffFullStackEngineerBot');
+      expect(promotedAgent.assignedResponsibilities).toContain('Lead technical design reviews across engineering team');
+      expect(promotedAgent.currentConfig.configVersion).toBe('1.0.1');
     });
   });
 
@@ -174,11 +277,11 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
   });
 
   // =========================================================================
-  // 4. Valid Organizational Relationships
+  // 4. Valid Organizational Relationships & Chain of Command
   // =========================================================================
   describe('4. Organizational Hierarchy & Chain of Command', () => {
     it('verifies the full workforce hierarchy validates without errors', () => {
-      const validation = validateWorkforceHierarchy(CANONICAL_FOUNDING_AGENTS);
+      const validation = validateOrganizationalRegistry(CANONICAL_FOUNDING_AGENTS);
       expect(validation.errors).toEqual([]);
       expect(validation.valid).toBe(true);
     });
@@ -206,7 +309,7 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
 
     it('verifies all Specialists report to their Department Director', () => {
       const specialists = CANONICAL_FOUNDING_AGENTS.filter((a) => a.level === 'SPECIALIST');
-      expect(specialists).toHaveLength(20); // 20 specialized AI employees
+      expect(specialists).toHaveLength(20);
 
       for (const specialist of specialists) {
         const supervisor = findAgentById(specialist.supervisor.supervisorAgentId!);
@@ -230,72 +333,115 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
   });
 
   // =========================================================================
-  // 5. Invalid or Circular Reporting Relationships
+  // 5. Complete Organizational Registry Validation (Point 6)
   // =========================================================================
-  describe('5. Hierarchy Anomaly & Cycle Detection', () => {
+  describe('5. Comprehensive Organizational Registry Validation', () => {
     it('detects and rejects a circular reporting chain (Agent A -> Agent B -> Agent A)', () => {
-      const corruptedRoster: AgentIdentity[] = JSON.parse(JSON.stringify(CANONICAL_FOUNDING_AGENTS));
+      const corruptedRoster = cloneFoundingRoster();
       const cto = corruptedRoster.find((a) => a.agentCode === 'TECH-CTO')!;
       const architect = corruptedRoster.find((a) => a.agentCode === 'TECH-ARCH')!;
 
       // Make CTO report to Architect, while Architect reports to CTO
-      cto.supervisor.supervisorAgentId = architect.id;
-      architect.supervisor.supervisorAgentId = cto.id;
+      cto.currentConfig.supervisor.supervisorAgentId = architect.id;
+      architect.currentConfig.supervisor.supervisorAgentId = cto.id;
 
-      const result = validateWorkforceHierarchy(corruptedRoster);
+      const result = validateOrganizationalRegistry(corruptedRoster);
       expect(result.valid).toBe(false);
       expect(result.errors.some((e) => e.includes('Circular reporting relationship'))).toBe(true);
     });
 
     it('detects and rejects an agent reporting to itself', () => {
-      const corruptedRoster: AgentIdentity[] = JSON.parse(JSON.stringify(CANONICAL_FOUNDING_AGENTS));
+      const corruptedRoster = cloneFoundingRoster();
       const cfo = corruptedRoster.find((a) => a.agentCode === 'FIN-CFO')!;
-      cfo.supervisor.supervisorAgentId = cfo.id;
+      cfo.currentConfig.supervisor.supervisorAgentId = cfo.id;
 
-      const result = validateWorkforceHierarchy(corruptedRoster);
+      const result = validateOrganizationalRegistry(corruptedRoster);
       expect(result.valid).toBe(false);
-      expect(result.errors.some((e) => e.includes('Circular reporting relationship'))).toBe(true);
+      expect(result.errors.some((e) => e.includes('Self-reporting prohibited'))).toBe(true);
+    });
+
+    it('detects when an agent has a missing supervisor', () => {
+      const corruptedRoster = cloneFoundingRoster();
+      const engineer = corruptedRoster.find((a) => a.agentCode === 'TECH-FSE')!;
+      engineer.currentConfig.supervisor.supervisorAgentId = null;
+
+      const result = validateOrganizationalRegistry(corruptedRoster);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes('has missing supervisor'))).toBe(true);
     });
 
     it('detects when an agent references a non-existent supervisor ID', () => {
-      const corruptedRoster: AgentIdentity[] = JSON.parse(JSON.stringify(CANONICAL_FOUNDING_AGENTS));
+      const corruptedRoster = cloneFoundingRoster();
       const engineer = corruptedRoster.find((a) => a.agentCode === 'TECH-FSE')!;
-      engineer.supervisor.supervisorAgentId = randomUUID(); // Non-existent ID
+      engineer.currentConfig.supervisor.supervisorAgentId = randomUUID();
 
-      const result = validateWorkforceHierarchy(corruptedRoster);
+      const result = validateOrganizationalRegistry(corruptedRoster);
       expect(result.valid).toBe(false);
       expect(result.errors.some((e) => e.includes('references non-existent supervisor ID'))).toBe(true);
     });
 
     it('detects a seniority violation (e.g. Director reporting to Specialist)', () => {
-      const corruptedRoster: AgentIdentity[] = JSON.parse(JSON.stringify(CANONICAL_FOUNDING_AGENTS));
+      const corruptedRoster = cloneFoundingRoster();
       const cto = corruptedRoster.find((a) => a.agentCode === 'TECH-CTO')!;
       const engineer = corruptedRoster.find((a) => a.agentCode === 'TECH-FSE')!;
 
       // CTO reports to Engineer
-      cto.supervisor.supervisorAgentId = engineer.id;
+      cto.currentConfig.supervisor.supervisorAgentId = engineer.id;
 
-      const result = validateWorkforceHierarchy(corruptedRoster);
+      const result = validateOrganizationalRegistry(corruptedRoster);
       expect(result.valid).toBe(false);
       expect(result.errors.some((e) => e.includes('Hierarchy seniority violation'))).toBe(true);
+    });
+
+    it('detects when a department has no active Director assigned', () => {
+      const corruptedRoster = cloneFoundingRoster();
+      // Deactivate the CFO
+      const cfo = corruptedRoster.find((a) => a.agentCode === 'FIN-CFO')!;
+      cfo.currentConfig.operationalStatus = 'TERMINATED';
+
+      const result = validateOrganizationalRegistry(corruptedRoster);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes("Department 'financial_intelligence' has no active Director"))).toBe(true);
+    });
+
+    it('detects and rejects duplicate agent IDs or duplicate agent codes', () => {
+      const corruptedRoster = cloneFoundingRoster();
+      const agentA = corruptedRoster[0]!;
+      const agentB = corruptedRoster[1]!;
+
+      // Inject duplicate ID
+      agentB.identity.id = agentA.identity.id;
+      agentB.currentConfig.agentId = agentA.identity.id;
+
+      const result = validateOrganizationalRegistry(corruptedRoster);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes('Duplicate agent ID'))).toBe(true);
+    });
+
+    it('detects and rejects prohibited Owner-level permission assignments on AI employees', () => {
+      const corruptedRoster = cloneFoundingRoster();
+      const cto = corruptedRoster.find((a) => a.agentCode === 'TECH-CTO')!;
+
+      // Attempt to grant OWNER_ONLY scope or remove prohibited actions
+      cto.currentConfig.permissionProfile.scope = 'OWNER_ONLY';
+
+      const result = validateOrganizationalRegistry(corruptedRoster);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes("cannot be assigned 'OWNER_ONLY' authority scope"))).toBe(true);
     });
   });
 
   // =========================================================================
-  // 6. Missing or Invalid Department References
+  // 6. Department Reference Integrity
   // =========================================================================
   describe('6. Department Reference Integrity', () => {
     it('rejects an agent configured with an invalid department ID', () => {
-      const baseAgent = CANONICAL_FOUNDING_AGENTS[0];
-      const invalidAgent = {
-        ...baseAgent,
-        id: randomUUID(),
-        agentCode: 'TEST-001',
-        departmentId: 'non_existent_department',
-      };
+      const corruptedRoster = cloneFoundingRoster();
+      (corruptedRoster[0]!.identity as any).departmentId = 'unknown_department';
 
-      const result = AgentIdentitySchema.safeParse(invalidAgent);
-      expect(result.success).toBe(false);
+      const result = validateOrganizationalRegistry(corruptedRoster);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes("references invalid department: 'unknown_department'"))).toBe(true);
     });
 
     it('correctly queries agents and directors by valid department ID', () => {
@@ -312,9 +458,9 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
   });
 
   // =========================================================================
-  // 7. Communication Envelope Validation
+  // 7. Communication Envelope Validation & Typed Payloads (Point 4)
   // =========================================================================
-  describe('7. Standardized Communication Protocol & Envelope Validation', () => {
+  describe('7. Standardized Communication Protocol & Type-Specific Payloads', () => {
     it('validates all 14 mandatory message categories', () => {
       const mandatoryCategories = [
         'TASK_ASSIGNMENT',
@@ -338,18 +484,38 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
       }
     });
 
-    it('maintains backward compatibility with legacy message types', () => {
-      const legacyTypes = [
-        'TASK_DELEGATION',
-        'REVIEW_REQUEST',
-        'REVIEW_APPROVAL',
-        'REVIEW_REJECTION',
-        'INFO_REQUEST',
-        'INFO_RESPONSE',
-      ];
-      for (const t of legacyTypes) {
-        expect(CommunicationMessageTypeSchema.safeParse(t).success).toBe(true);
-      }
+    it('validates message payloads against message-type-specific schemas', () => {
+      // 1. Valid TASK_ASSIGNMENT payload
+      const validAssignment = {
+        taskId: randomUUID(),
+        title: 'Build Schema Test Suite',
+        instructions: 'Implement Vitest suite for shared-types',
+        priority: 'HIGH',
+      };
+      expect(validateMessagePayload('TASK_ASSIGNMENT', validAssignment).valid).toBe(true);
+
+      // 2. Invalid TASK_ASSIGNMENT payload (missing title & instructions)
+      const invalidAssignment = { taskId: randomUUID() };
+      const invalidCheck = validateMessagePayload('TASK_ASSIGNMENT', invalidAssignment);
+      expect(invalidCheck.valid).toBe(false);
+      expect(invalidCheck.error).toContain('instructions');
+
+      // 3. Valid TASK_COMPLETION payload
+      const validCompletion = {
+        taskId: randomUUID(),
+        status: 'SUCCESS',
+        summary: 'All schemas verified',
+        outputData: { testCount: 80 },
+      };
+      expect(validateMessagePayload('TASK_COMPLETION', validCompletion).valid).toBe(true);
+
+      // 4. Valid FAILURE_REPORT payload
+      const validFailure = {
+        taskId: randomUUID(),
+        failureClassification: 'CIRCUIT_BREAKER_HALTED',
+        errorMessage: 'Emergency kill switch latched',
+      };
+      expect(validateMessagePayload('FAILURE_REPORT', validFailure).valid).toBe(true);
     });
 
     it('successfully parses a fully populated communication envelope', () => {
@@ -365,8 +531,10 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
         priority: 'HIGH',
         taskId: randomUUID(),
         payload: {
-          objective: 'Implement Schema Test Suite',
-          milestone: '2.1',
+          taskId: randomUUID(),
+          title: 'Implement Schema Test Suite',
+          instructions: 'Milestone 2.1 complete tests',
+          priority: 'HIGH',
         },
         correlationId: randomUUID(),
         causationId: randomUUID(),
@@ -394,67 +562,92 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
   });
 
   // =========================================================================
-  // 8. Invalid Sender and Recipient References & Anti-Spoofing
+  // 8. Trusted Sender Context & Anti-Spoofing (Point 4)
   // =========================================================================
-  describe('8. Sender Authentication & Anti-Spoofing Verification', () => {
-    it('detects and rejects sender identity spoofing when caller does not match declared sender', () => {
-      const declaredSenderId = randomUUID();
-      const actualCallerId = randomUUID();
+  describe('8. Trusted Backend Execution Context & Anti-Spoofing Verification', () => {
+    const trustedContext: ExecutionContext = {
+      contextId: randomUUID(),
+      agentId: '00000000-0000-0000-0000-000000000007',
+      agentCode: 'TECH-CTO',
+      departmentId: 'technology_engineering',
+      tenantId: randomUUID(),
+      callerVerified: true,
+      callerSignature: 'sig-verified-cto-token',
+      environment: 'PRODUCTION',
+      traceId: randomUUID(),
+      initiatedAt: new Date().toISOString(),
+      timeoutMs: 60000,
+    };
 
-      const envelope = {
+    it('derives sender identity strictly from trusted ExecutionContext via createVerifiedCommunicationEnvelope', () => {
+      const envelope = createVerifiedCommunicationEnvelope(trustedContext, {
+        recipientDepartmentId: 'technology_engineering',
+        recipientAgentId: '00000000-0000-0000-0000-000000000009',
+        recipientAgentCode: 'TECH-FSE',
+        type: 'TASK_ASSIGNMENT',
+        priority: 'HIGH',
+        payload: {
+          taskId: randomUUID(),
+          title: 'Implement verified envelope',
+          instructions: 'Derive sender from context',
+          priority: 'HIGH',
+        },
+      });
+
+      // Sender MUST match trusted execution context exactly
+      expect(envelope.senderAgentId).toBe(trustedContext.agentId);
+      expect(envelope.senderAgentCode).toBe(trustedContext.agentCode);
+      expect(envelope.senderDepartmentId).toBe(trustedContext.departmentId);
+      expect(envelope.verifiedSenderSignature).toBe(trustedContext.callerSignature);
+
+      // Verify the envelope passes validation against the trusted context
+      const validation = validateCommunicationEnvelope(envelope, trustedContext);
+      expect(validation.valid).toBe(true);
+    });
+
+    it('detects and rejects sender identity spoofing when payload contains arbitrary senderAgentId', () => {
+      const impersonatorId = randomUUID();
+
+      const forgedEnvelope = {
         messageId: randomUUID(),
-        senderAgentId: declaredSenderId, // Attempting to impersonate
-        senderDepartmentId: 'executive_office',
+        senderAgentId: impersonatorId, // Forged sender
+        senderDepartmentId: 'technology_engineering',
         recipientAgentId: randomUUID(),
         recipientDepartmentId: 'financial_intelligence',
         type: 'TASK_ASSIGNMENT',
         priority: 'MEDIUM',
-        payload: { data: 'test' },
+        payload: {
+          taskId: randomUUID(),
+          title: 'Unauthorized Task',
+          instructions: 'Execute funds transfer',
+        },
         correlationId: randomUUID(),
         sentAt: new Date().toISOString(),
       };
 
-      // When verified caller does not match declared sender, validateCommunicationEnvelope must reject
-      const check = validateCommunicationEnvelope(envelope, actualCallerId);
+      // When validated against the true trusted caller context, it MUST reject
+      const check = validateCommunicationEnvelope(forgedEnvelope, trustedContext);
       expect(check.valid).toBe(false);
       expect(check.error).toContain('Sender identity spoofing rejected');
     });
 
-    it('accepts envelope when verified caller matches declared sender', () => {
-      const validSenderId = randomUUID();
-
-      const envelope = {
+    it('rejects envelope if payload does not conform to message-type-specific schema', () => {
+      const envelopeWithMalformedPayload = {
         messageId: randomUUID(),
-        senderAgentId: validSenderId,
-        senderDepartmentId: 'executive_office',
+        senderAgentId: trustedContext.agentId,
+        senderDepartmentId: trustedContext.departmentId,
         recipientAgentId: randomUUID(),
-        recipientDepartmentId: 'financial_intelligence',
+        recipientDepartmentId: 'technology_engineering',
         type: 'TASK_ASSIGNMENT',
         priority: 'MEDIUM',
-        payload: { data: 'test' },
+        payload: { invalidField: 'missing required title and instructions' }, // Malformed payload
         correlationId: randomUUID(),
         sentAt: new Date().toISOString(),
       };
 
-      const check = validateCommunicationEnvelope(envelope, validSenderId);
-      expect(check.valid).toBe(true);
-      expect(check.envelope).toBeDefined();
-    });
-
-    it('rejects envelope missing both recipient agent and recipient department', () => {
-      const envelope = {
-        messageId: randomUUID(),
-        senderAgentId: randomUUID(),
-        senderDepartmentId: 'executive_office',
-        type: 'TASK_ASSIGNMENT',
-        priority: 'MEDIUM',
-        payload: {},
-        correlationId: randomUUID(),
-        sentAt: new Date().toISOString(),
-      };
-
-      const check = validateCommunicationEnvelope(envelope);
+      const check = validateCommunicationEnvelope(envelopeWithMalformedPayload, trustedContext);
       expect(check.valid).toBe(false);
+      expect(check.error).toContain("Invalid payload for message type 'TASK_ASSIGNMENT'");
     });
   });
 
@@ -571,20 +764,29 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
   });
 
   // =========================================================================
-  // 10. Permission and Authority Classification
+  // 10. CEO & Executive Authority Subordination to Owner (Point 3)
   // =========================================================================
-  describe('10. Authority Scopes & Permission Profile Boundaries', () => {
-    it('validates authority scopes and permission profile schema', () => {
-      const scopes = ['OWNER_ONLY', 'EXECUTIVE_WIDE', 'DEPARTMENT_SCOPED', 'SPECIALIST_LOCAL'];
-      for (const scope of scopes) {
-        expect(AuthorityScopeSchema.safeParse(scope).success).toBe(true);
-      }
+  describe('10. CEO & Executive Authority Subordination to Owner Authority', () => {
+    it('enforces that the CEO profile does not possess Owner-level permissions or wildcards', () => {
+      const ceo = findAgentByCode('EXEC-CEO')!;
+      expect(ceo.permissionProfile.allowedPermissions).not.toContain('*');
+      expect(ceo.permissionProfile.scope).toBe('EXECUTIVE_WIDE');
 
-      const cfo = findAgentByCode('FIN-CFO')!;
-      expect(PermissionProfileSchema.safeParse(cfo.permissionProfile).success).toBe(true);
-      expect(cfo.permissionProfile.scope).toBe('DEPARTMENT_SCOPED');
-      expect(cfo.permissionProfile.maxBudgetApprovalUsd).toBe(50000);
-      expect(cfo.permissionProfile.canAuthorizeSubordinates).toBe(true);
+      // CEO cannot authorize capital transfers, live trading, binding contracts, or governance overrides
+      for (const prohibited of MANDATORY_PROHIBITED_FOR_ALL_AGENTS) {
+        expect(ceo.permissionProfile.prohibitedRestrictedActions).toContain(prohibited);
+        const check = validateAgentAction(ceo.permissionProfile, prohibited);
+        expect(check.allowed).toBe(false);
+        expect(check.reason).toContain('CEO/Executive authority remains subordinate to Owner');
+      }
+    });
+
+    it('enforces that no agent profile can self-elevate permissions', () => {
+      for (const agent of CANONICAL_FOUNDING_AGENTS) {
+        const check = validateAgentAction(agent.permissionProfile, 'PERMISSION_ELEVATION');
+        expect(check.allowed).toBe(false);
+        expect(agent.permissionProfile.prohibitedRestrictedActions).toContain('PERMISSION_ELEVATION');
+      }
     });
 
     it('validates permission checking logic: allowed vs unauthorized actions', () => {
@@ -602,15 +804,6 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
       // 3. Prohibited action: LIVE_TRADING_EXECUTION is strictly barred
       const check3 = validateAgentAction(cfo.permissionProfile, 'LIVE_TRADING_EXECUTION');
       expect(check3.allowed).toBe(false);
-      expect(check3.reason).toContain('is strictly prohibited');
-    });
-
-    it('enforces that no agent profile can self-elevate permissions', () => {
-      for (const agent of CANONICAL_FOUNDING_AGENTS) {
-        const check = validateAgentAction(agent.permissionProfile, 'PERMISSION_ELEVATION');
-        expect(check.allowed).toBe(false);
-        expect(agent.permissionProfile.prohibitedRestrictedActions).toContain('PERMISSION_ELEVATION');
-      }
     });
   });
 
@@ -671,10 +864,10 @@ describe('Milestone 2.1 — Shared Hierarchy & Communication Schemas', () => {
   });
 
   // =========================================================================
-  // 12. Compatibility with Phase 1 Types
+  // 12. Compatibility with Phase 1 Types & Regression Checks (Point 7)
   // =========================================================================
-  describe('12. Phase 1 Backward Compatibility', () => {
-    it('verifies toAgentSpec transforms AgentIdentity into fully valid Phase 1 AgentSpec', () => {
+  describe('12. Phase 1 Backward Compatibility & Regression Tests', () => {
+    it('verifies toAgentSpec transforms AgentRecord into fully valid Phase 1 AgentSpec', () => {
       for (const agent of CANONICAL_FOUNDING_AGENTS) {
         const spec = toAgentSpec(agent);
         expect(spec.id).toBe(agent.id);

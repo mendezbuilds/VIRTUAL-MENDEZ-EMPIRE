@@ -93,11 +93,14 @@
 ---
 
 ## ADR-010: Canonical 30-Agent Workforce, Authority Boundaries & Communication Protocol (Milestone 2.1)
-- **Status:** APPROVED (Milestone 2.1 Implementation Directive)
+- **Status:** APPROVED (Milestone 2.1 Implementation Directive with Supervisor Corrections)
 - **Context:** Milestone 2.1 establishes the common data contracts and type system underpinning the entire Virtual MENDEZ EMPIRE workforce across 9 corporate departments, expanding from the preliminary 22-agent prototype to the approved target of 30 logical AI employees.
 - **Decision:**
-  1. Define 30 founding AI employee identities in `@vme/shared-types` (`agent-identity.ts`) across 9 canonical departments, each with immutable UUID, unique uppercase agent code (`DEPT-ROLE`), display name, job title, organizational level, reporting supervisor, assigned responsibilities, required capabilities, permission profile, and versioned configuration.
-  2. Enforce strict seniority ranking (`OWNER: 0, EXECUTIVE: 1, DIRECTOR: 2, MANAGER: 3, SPECIALIST: 4, OPERATOR: 5`) and automated cycle detection to guarantee acyclic hierarchical trees.
-  3. Classify restricted actions (`EXTERNAL_COMMUNICATION`, `JOB_APPLICATION_SUBMISSION`, `BINDING_CONTRACT_ACCEPTANCE`, `CAPITAL_TRANSFER`, `LIVE_TRADING_EXECUTION`, `SPENDING_EXCEEDING_LIMIT`, `GOVERNANCE_OVERRIDE`, `EMERGENCY_SHUTDOWN_OVERRIDE`, `PERMISSION_ELEVATION`) and prohibit autonomous execution without verified Owner authorization.
-  4. Standardize communication envelopes supporting 14 canonical message categories with sender verification against trusted execution context to bar impersonation.
+  1. **Exact 30-Agent Roster Distribution:** Executive Office (2), Financial Intelligence (4), Technology & Engineering (5), Business Development (3), Marketing & Growth (3), Operations & Administration (3), Opportunity Acquisition (4), Research & Intelligence (3), Security & Governance (3).
+  2. **Identity vs. Configuration Decoupling:** Decouple permanent immutable identity (`id`, `agentCode`, `departmentId`, `createdAt`) from versioned mutable configuration (`displayName`, `jobTitle`, `level`, `supervisor`, `assignedResponsibilities`, `requiredCapabilities`, `permissionProfile`, `operationalStatus`, `modelConfig`, `configVersion`). Promoting an employee or changing titles/supervisors preserves permanent identity and agent code immutably.
+  3. **CEO Subordination to Owner Authority:** Executive and CEO authority remain strictly subordinate to Owner authority. Strategic coordination does not grant permission to authorize capital transfers, live trading, binding contracts, or governance overrides.
+  4. **Trusted Sender Derivation & Typed Payloads:** Communication sender identity is derived directly from trusted backend `ExecutionContext`. Arbitrary payload `senderAgentId` is never trusted. All 14 message types validate against dedicated Zod payload schemas.
+  5. **Treasury Controls vs. Department Planning Budgets:** Department monthly budgets are designated as indicative planning allocations, not automatic spending permissions. Actual expenditures are governed by separate `TreasurySpendingControl` contracts with single-transaction limits and Owner authorization thresholds.
+  6. **Comprehensive Organizational Registry Validation:** Implement exhaustive registry validation including missing supervisors, invalid department references, self-reporting, circular reporting chains, director assignments, duplicate IDs/codes, seniority violations, and prohibited Owner-level permission assignments.
+  7. **Phase 1 Contract Preservation:** Maintain 100% backward compatibility with Phase 1 types and downstream services, verified via automated regression testing.
 - **Consequences:** Canonical type definitions and runtime validation schemas in `@vme/shared-types` serve as the immutable single source of truth for all subsequent Phase 2 milestones.

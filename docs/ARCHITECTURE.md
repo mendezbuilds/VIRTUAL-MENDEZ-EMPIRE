@@ -68,10 +68,22 @@ VME establishes nine foundational departments staffed by 30 canonical AI employe
 
 ### 2.1 Corporate Authority & Governance Perimeter
 - **Owner Authority:** Strategic directives, capital allocation approval, consequential action authorization, governance overrides, emergency shutdown and recovery authorization.
-- **Executive Authority:** Department coordination, objective decomposition, internal task assignment, delegation within authorized boundaries.
-- **Department Director Authority:** Department task allocation, specialist supervision, department reporting, authorized resource requests.
+- **Executive Authority Subordination:** CEO and executive authority remain strictly subordinate to Owner authority. Strategic coordination does not grant permission to authorize capital transfers, live trading, binding contract acceptance, or governance overrides.
+- **Department Director Authority:** Department task allocation, specialist supervision, department reporting, authorized resource requests within approved treasury limits.
 - **Specialist Authority:** Execution within assigned responsibilities, internal communication, progress reporting.
 - **Critical Invariant:** No agent can grant itself additional permissions. Live financial trades, capital transfers, external emails, and contracts strictly require Owner authorization.
+
+### 2.2 Separation of Immutable Identity from Mutable Configuration
+- **Permanent Immutable Identity (`AgentIdentity`):** Immutable UUID (`id`), permanent uppercase code (`agentCode`, e.g. `EXEC-CEO`), founding department ID (`departmentId`), and creation timestamp (`createdAt`). Identity anchors remain permanent across promotions, role changes, and reporting tree updates.
+- **Versioned Mutable Configuration (`AgentConfiguration`):** Versioned lifecycle state containing display name, job title, organizational level, reporting supervisor, assigned responsibilities, required capabilities, permission profile, operational status, model configuration, and semantic version (`configVersion`).
+
+### 2.3 Treasury Controls & Indicative Planning Allocations
+- **Department Budgets as Planning Allocations:** Monthly department budgets (`budgetMonthlyAllocationUsd`) are indicative planning ceilings, NOT automatic spending permissions.
+- **Treasury Controls (`TreasurySpendingControl`):** Actual expenditures are governed by separate treasury controls enforcing single transaction limits, authorized signer level verification, mandatory double-entry ledger postings, and strict Owner authorization gates for any spend exceeding configured thresholds.
+
+### 2.4 Standardized Communication & Trusted Sender Derivation
+- **Trusted Sender Derivation:** Communication envelopes derive sender identity (`senderAgentId`, `senderDepartmentId`, `senderAgentCode`, and signature) strictly from the verified backend `ExecutionContext`. Sender IDs supplied in arbitrary message payloads are rejected.
+- **Type-Specific Payload Schemas:** All 14 canonical message categories are validated against dedicated Zod payload schemas before entry into the message routing subsystem.
 
 ---
 

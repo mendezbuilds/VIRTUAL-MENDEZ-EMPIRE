@@ -16,6 +16,7 @@ export type AuthorityScope = z.infer<typeof AuthorityScopeSchema>;
 /**
  * Consequential and Restricted Action Classification.
  * Any action classified here CANNOT execute autonomously without explicit Owner authorization.
+ * Executive or CEO status NEVER grants permission to execute or autonomously authorize these actions.
  */
 export const RestrictedActionTypeSchema = z.enum([
   'EXTERNAL_COMMUNICATION',       // Sending cold emails, social posts, public releases
@@ -32,6 +33,17 @@ export const RestrictedActionTypeSchema = z.enum([
 export type RestrictedActionType = z.infer<typeof RestrictedActionTypeSchema>;
 
 /**
+ * Mandatory Prohibited Actions for ALL AI employees (including Executive leadership / CEO)
+ */
+export const MANDATORY_PROHIBITED_FOR_ALL_AGENTS: RestrictedActionType[] = [
+  'CAPITAL_TRANSFER',
+  'LIVE_TRADING_EXECUTION',
+  'BINDING_CONTRACT_ACCEPTANCE',
+  'GOVERNANCE_OVERRIDE',
+  'PERMISSION_ELEVATION',
+];
+
+/**
  * Fine-grained Permission Specification
  */
 export const PermissionSchema = z.string().min(1).regex(/^[a-z0-9_-]+:[a-z0-9_*]+$/, {
@@ -41,7 +53,8 @@ export const PermissionSchema = z.string().min(1).regex(/^[a-z0-9_-]+:[a-z0-9_*]
 export type Permission = z.infer<typeof PermissionSchema>;
 
 /**
- * Permission Profile defining an agent's operational boundaries
+ * Permission Profile defining an agent's operational boundaries.
+ * CEO and Executive authority remain strictly subordinate to Owner authority.
  */
 export const PermissionProfileSchema = z.object({
   profileId: z.string().uuid(),
@@ -51,16 +64,10 @@ export const PermissionProfileSchema = z.object({
   allowedPermissions: z.array(z.string().min(1)),
   maxBudgetApprovalUsd: z.number().nonnegative().default(0),
   maxDelegationDepth: z.number().int().min(0).max(5).default(0),
-  prohibitedRestrictedActions: z.array(RestrictedActionTypeSchema).default([
-    'CAPITAL_TRANSFER',
-    'LIVE_TRADING_EXECUTION',
-    'GOVERNANCE_OVERRIDE',
-    'PERMISSION_ELEVATION',
-  ]),
+  prohibitedRestrictedActions: z.array(RestrictedActionTypeSchema).default(MANDATORY_PROHIBITED_FOR_ALL_AGENTS),
   requiresOwnerAuthorizationFor: z.array(RestrictedActionTypeSchema).default([
     'EXTERNAL_COMMUNICATION',
     'JOB_APPLICATION_SUBMISSION',
-    'BINDING_CONTRACT_ACCEPTANCE',
     'SPENDING_EXCEEDING_LIMIT',
     'EMERGENCY_SHUTDOWN_OVERRIDE',
   ]),
@@ -190,14 +197,35 @@ export function requiresOwnerGate(
 }
 
 /**
- * Validates whether an agent with a given profile can execute an action
+ * Validates whether an agent with a given profile can execute an action.
+ * Enforces CEO and Executive subordination to Owner authority:
+ * Even if an agent has EXECUTIVE_WIDE scope or wildcard permissions,
+ * restricted actions NEVER execute without satisfying the Owner gate.
  */
 export function validateAgentAction(
   profile: PermissionProfile,
   actionType?: RestrictedActionType,
   requestedPermission?: string
 ): { allowed: boolean; reason?: string; requiresOwnerReview?: boolean } {
-  // Check permission string if provided
+  // 1. Prohibited restricted actions check: CANNOT be executed autonomously by ANY agent
+  if (actionType && profile.prohibitedRestrictedActions.includes(actionType)) {
+    return {
+      allowed: false,
+      reason: `Restricted action '${actionType}' is strictly prohibited for this agent profile (CEO/Executive authority remains subordinate to Owner)`,
+      requiresOwnerReview: requiresOwnerGate(actionType),
+    };
+  }
+
+  // 2. Requires Owner authorization check
+  if (actionType && profile.requiresOwnerAuthorizationFor.includes(actionType)) {
+    return {
+      allowed: false,
+      reason: `Restricted action '${actionType}' requires Owner authorization gate`,
+      requiresOwnerReview: true,
+    };
+  }
+
+  // 3. Permission string check if provided
   if (requestedPermission) {
     const hasWildcard = profile.allowedPermissions.includes('*');
     const hasPermission = profile.allowedPermissions.includes(requestedPermission);
@@ -217,26 +245,29 @@ export function validateAgentAction(
     }
   }
 
-  // Check restricted action type
-  if (actionType) {
-    // Prohibited actions can NEVER be executed autonomously
-    if (profile.prohibitedRestrictedActions.includes(actionType)) {
-      return {
-        allowed: false,
-        reason: `Restricted action '${actionType}' is strictly prohibited for this agent profile`,
-        requiresOwnerReview: requiresOwnerGate(actionType),
-      };
-    }
+  return { allowed: true };
+}
 
-    // Requires Owner authorization
-    if (profile.requiresOwnerAuthorizationFor.includes(actionType)) {
-      return {
-        allowed: false,
-        reason: `Restricted action '${actionType}' requires Owner authorization gate`,
-        requiresOwnerReview: true,
-      };
+/**
+ * Validates that an AI employee's permission profile does NOT hold prohibited Owner-level privileges.
+ */
+export function assertNonOwnerProfileValid(profile: PermissionProfile): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  // Non-Owner profiles cannot hold OWNER_ONLY scope
+  if (profile.scope === 'OWNER_ONLY') {
+    errors.push(`AI employee profile cannot be assigned 'OWNER_ONLY' authority scope`);
+  }
+
+  // Must include mandatory prohibited actions
+  for (const prohibited of MANDATORY_PROHIBITED_FOR_ALL_AGENTS) {
+    if (!profile.prohibitedRestrictedActions.includes(prohibited)) {
+      errors.push(`Profile must include '${prohibited}' in prohibitedRestrictedActions`);
     }
   }
 
-  return { allowed: true };
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
 }

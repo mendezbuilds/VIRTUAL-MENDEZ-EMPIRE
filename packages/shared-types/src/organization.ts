@@ -22,8 +22,8 @@ export type DepartmentId = z.infer<typeof DepartmentIdSchema>;
  * Lower numeric rank indicates higher corporate seniority.
  */
 export const OrganizationalLevelSchema = z.enum([
-  'OWNER',       // Ultimate authority & capital provider
-  'EXECUTIVE',   // C-Suite (CEO, COO)
+  'OWNER',       // Ultimate authority & capital provider (Stephen Mendez)
+  'EXECUTIVE',   // C-Suite (CEO, COO) - strategic coordination
   'DIRECTOR',    // Department Heads / Directors
   'MANAGER',     // Tactical Managers / Leads
   'SPECIALIST',  // Functional Execution Specialists
@@ -69,7 +69,10 @@ export const DepartmentLeadershipSchema = z.object({
 export type DepartmentLeadership = z.infer<typeof DepartmentLeadershipSchema>;
 
 /**
- * Canonical Department Data Contract
+ * Canonical Department Data Contract.
+ * IMPORTANT: Department budgets are planning allocations, NOT automatic spending permissions.
+ * Actual disbursements remain strictly subject to treasury controls, double-entry verification,
+ * and Owner authorization thresholds.
  */
 export const DepartmentSchema = z.object({
   id: DepartmentIdSchema,
@@ -77,6 +80,10 @@ export const DepartmentSchema = z.object({
   description: z.string().min(1),
   directorId: z.string().uuid().optional(),
   directorCode: z.string().optional(),
+  // Indicative monthly planning allocations (NOT pre-authorized spending)
+  budgetMonthlyAllocationUsd: z.number().nonnegative(),
+  budgetMonthlyAllocationNgn: z.number().nonnegative().optional(),
+  // Backward compatibility alias for Phase 1 / early Phase 2 tests
   budgetMonthlyUsd: z.number().nonnegative(),
   budgetMonthlyNgn: z.number().nonnegative().optional(),
   allowedCapabilities: z.array(z.string().min(1)),
@@ -87,6 +94,162 @@ export const DepartmentSchema = z.object({
 });
 
 export type Department = z.infer<typeof DepartmentSchema>;
+
+/**
+ * Treasury Spending Control Schema
+ * Governs actual spending authorization, independent of planning budget allocations.
+ */
+export const TreasurySpendingControlSchema = z.object({
+  departmentId: DepartmentIdSchema,
+  allocationCeilingUsd: z.number().nonnegative(),
+  singleTransactionLimitUsd: z.number().nonnegative(),
+  requiresOwnerAuthorizationThresholdUsd: z.number().nonnegative(),
+  authorizedSignerLevels: z.array(OrganizationalLevelSchema).default(['DIRECTOR', 'EXECUTIVE', 'OWNER']),
+  disbursementRequiresDoubleEntryPosting: z.boolean().default(true),
+});
+
+export type TreasurySpendingControl = z.infer<typeof TreasurySpendingControlSchema>;
+
+/**
+ * Canonical Treasury Spending Controls for all 9 departments
+ */
+export const CANONICAL_TREASURY_CONTROLS: TreasurySpendingControl[] = [
+  {
+    departmentId: 'executive_office',
+    allocationCeilingUsd: 10000,
+    singleTransactionLimitUsd: 2500,
+    requiresOwnerAuthorizationThresholdUsd: 5000,
+    authorizedSignerLevels: ['EXECUTIVE', 'OWNER'],
+    disbursementRequiresDoubleEntryPosting: true,
+  },
+  {
+    departmentId: 'financial_intelligence',
+    allocationCeilingUsd: 50000,
+    singleTransactionLimitUsd: 10000,
+    requiresOwnerAuthorizationThresholdUsd: 20000,
+    authorizedSignerLevels: ['DIRECTOR', 'EXECUTIVE', 'OWNER'],
+    disbursementRequiresDoubleEntryPosting: true,
+  },
+  {
+    departmentId: 'technology_engineering',
+    allocationCeilingUsd: 25000,
+    singleTransactionLimitUsd: 5000,
+    requiresOwnerAuthorizationThresholdUsd: 10000,
+    authorizedSignerLevels: ['DIRECTOR', 'EXECUTIVE', 'OWNER'],
+    disbursementRequiresDoubleEntryPosting: true,
+  },
+  {
+    departmentId: 'business_development',
+    allocationCeilingUsd: 15000,
+    singleTransactionLimitUsd: 3000,
+    requiresOwnerAuthorizationThresholdUsd: 5000,
+    authorizedSignerLevels: ['DIRECTOR', 'EXECUTIVE', 'OWNER'],
+    disbursementRequiresDoubleEntryPosting: true,
+  },
+  {
+    departmentId: 'marketing_growth',
+    allocationCeilingUsd: 12000,
+    singleTransactionLimitUsd: 2500,
+    requiresOwnerAuthorizationThresholdUsd: 5000,
+    authorizedSignerLevels: ['DIRECTOR', 'EXECUTIVE', 'OWNER'],
+    disbursementRequiresDoubleEntryPosting: true,
+  },
+  {
+    departmentId: 'operations_administration',
+    allocationCeilingUsd: 8000,
+    singleTransactionLimitUsd: 2000,
+    requiresOwnerAuthorizationThresholdUsd: 4000,
+    authorizedSignerLevels: ['DIRECTOR', 'EXECUTIVE', 'OWNER'],
+    disbursementRequiresDoubleEntryPosting: true,
+  },
+  {
+    departmentId: 'opportunity_acquisition',
+    allocationCeilingUsd: 10000,
+    singleTransactionLimitUsd: 2000,
+    requiresOwnerAuthorizationThresholdUsd: 5000,
+    authorizedSignerLevels: ['DIRECTOR', 'EXECUTIVE', 'OWNER'],
+    disbursementRequiresDoubleEntryPosting: true,
+  },
+  {
+    departmentId: 'research_intelligence',
+    allocationCeilingUsd: 7000,
+    singleTransactionLimitUsd: 1500,
+    requiresOwnerAuthorizationThresholdUsd: 3000,
+    authorizedSignerLevels: ['DIRECTOR', 'EXECUTIVE', 'OWNER'],
+    disbursementRequiresDoubleEntryPosting: true,
+  },
+  {
+    departmentId: 'security_governance',
+    allocationCeilingUsd: 15000,
+    singleTransactionLimitUsd: 5000,
+    requiresOwnerAuthorizationThresholdUsd: 10000,
+    authorizedSignerLevels: ['DIRECTOR', 'EXECUTIVE', 'OWNER'],
+    disbursementRequiresDoubleEntryPosting: true,
+  },
+];
+
+/**
+ * Evaluates whether a requested expenditure is authorized or requires Owner sign-off.
+ * Department planning allocations NEVER constitute automatic spending permissions.
+ */
+export function verifyDepartmentSpendingAuthorization(params: {
+  departmentId: DepartmentId;
+  amountUsd: number;
+  approverLevel: OrganizationalLevel;
+  isOwnerApproved?: boolean;
+}): { authorized: boolean; reason?: string; requiresOwnerAuthorization: boolean } {
+  const control = CANONICAL_TREASURY_CONTROLS.find((c) => c.departmentId === params.departmentId);
+  if (!control) {
+    return {
+      authorized: false,
+      reason: `No treasury spending control found for department ${params.departmentId}`,
+      requiresOwnerAuthorization: true,
+    };
+  }
+
+  // 1. Check if exceeding mandatory Owner threshold
+  if (params.amountUsd > control.requiresOwnerAuthorizationThresholdUsd && !params.isOwnerApproved) {
+    return {
+      authorized: false,
+      reason: `Expenditure of $${params.amountUsd} exceeds Owner authorization threshold of $${control.requiresOwnerAuthorizationThresholdUsd}`,
+      requiresOwnerAuthorization: true,
+    };
+  }
+
+  // 2. Check if exceeding monthly allocation ceiling
+  if (params.amountUsd > control.allocationCeilingUsd && !params.isOwnerApproved) {
+    return {
+      authorized: false,
+      reason: `Expenditure of $${params.amountUsd} exceeds department monthly allocation ceiling of $${control.allocationCeilingUsd}`,
+      requiresOwnerAuthorization: true,
+    };
+  }
+
+  // 3. Check approver seniority for single transaction limits
+  if (params.amountUsd > control.singleTransactionLimitUsd && !params.isOwnerApproved) {
+    if (!['DIRECTOR', 'EXECUTIVE', 'OWNER'].includes(params.approverLevel)) {
+      return {
+        authorized: false,
+        reason: `Expenditure of $${params.amountUsd} exceeds single transaction limit ($${control.singleTransactionLimitUsd}) for level ${params.approverLevel}`,
+        requiresOwnerAuthorization: false,
+      };
+    }
+  }
+
+  // 4. Verify approver has signing level
+  if (!control.authorizedSignerLevels.includes(params.approverLevel) && !params.isOwnerApproved) {
+    return {
+      authorized: false,
+      reason: `Level ${params.approverLevel} is not an authorized signer for department ${params.departmentId}`,
+      requiresOwnerAuthorization: false,
+    };
+  }
+
+  return {
+    authorized: true,
+    requiresOwnerAuthorization: false,
+  };
+}
 
 /**
  * Reporting Relationship between AI Agents
@@ -110,6 +273,7 @@ export const OrganizationalHierarchySchema = z.object({
   version: z.string().default('1.0.0'),
   departments: z.array(DepartmentSchema),
   reportingRelationships: z.array(ReportingRelationshipSchema),
+  treasuryControls: z.array(TreasurySpendingControlSchema).default(CANONICAL_TREASURY_CONTROLS),
   lastAuditTimestamp: z.string().datetime(),
 });
 
@@ -125,6 +289,8 @@ export const CANONICAL_DEPARTMENTS: Department[] = [
     description: 'Autonomous corporate governance, strategy formulation, Owner reporting, and department direction',
     directorId: '00000000-0000-0000-0000-000000000001',
     directorCode: 'EXEC-CEO',
+    budgetMonthlyAllocationUsd: 10000,
+    budgetMonthlyAllocationNgn: 15000000,
     budgetMonthlyUsd: 10000,
     budgetMonthlyNgn: 15000000,
     allowedCapabilities: [
@@ -144,6 +310,8 @@ export const CANONICAL_DEPARTMENTS: Department[] = [
     description: 'Treasury operations, immutable double-entry accounting, FX & Crypto market intelligence and paper trading',
     directorId: '00000000-0000-0000-0000-000000000003',
     directorCode: 'FIN-CFO',
+    budgetMonthlyAllocationUsd: 50000,
+    budgetMonthlyAllocationNgn: 75000000,
     budgetMonthlyUsd: 50000,
     budgetMonthlyNgn: 75000000,
     allowedCapabilities: [
@@ -164,6 +332,8 @@ export const CANONICAL_DEPARTMENTS: Department[] = [
     description: 'Architecture, software engineering, continuous delivery, agent tooling and platform reliability',
     directorId: '00000000-0000-0000-0000-000000000007',
     directorCode: 'TECH-CTO',
+    budgetMonthlyAllocationUsd: 25000,
+    budgetMonthlyAllocationNgn: 37500000,
     budgetMonthlyUsd: 25000,
     budgetMonthlyNgn: 37500000,
     allowedCapabilities: [
@@ -184,6 +354,8 @@ export const CANONICAL_DEPARTMENTS: Department[] = [
     description: 'Enterprise contract sourcing, B2B deal negotiation, partnerships, and subsidiary incubation',
     directorId: '00000000-0000-0000-0000-000000000010',
     directorCode: 'BIZ-DIR',
+    budgetMonthlyAllocationUsd: 15000,
+    budgetMonthlyAllocationNgn: 22500000,
     budgetMonthlyUsd: 15000,
     budgetMonthlyNgn: 22500000,
     allowedCapabilities: [
@@ -203,6 +375,8 @@ export const CANONICAL_DEPARTMENTS: Department[] = [
     description: 'Audience acquisition, brand consistency, social distribution, and multi-channel marketing campaigns',
     directorId: '00000000-0000-0000-0000-000000000012',
     directorCode: 'MKT-DIR',
+    budgetMonthlyAllocationUsd: 12000,
+    budgetMonthlyAllocationNgn: 18000000,
     budgetMonthlyUsd: 12000,
     budgetMonthlyNgn: 18000000,
     allowedCapabilities: [
@@ -222,6 +396,8 @@ export const CANONICAL_DEPARTMENTS: Department[] = [
     description: 'Process optimization, corporate compliance, workflow coordination, and resource scheduling',
     directorId: '00000000-0000-0000-0000-000000000014',
     directorCode: 'OPS-DIR',
+    budgetMonthlyAllocationUsd: 8000,
+    budgetMonthlyAllocationNgn: 12000000,
     budgetMonthlyUsd: 8000,
     budgetMonthlyNgn: 12000000,
     allowedCapabilities: [
@@ -241,6 +417,8 @@ export const CANONICAL_DEPARTMENTS: Department[] = [
     description: 'Dual-track acquisition engine: Track A (Owner jobs/contracts) & Track B (Empire B2B leads and bounties)',
     directorId: '00000000-0000-0000-0000-000000000016',
     directorCode: 'OPP-DIR',
+    budgetMonthlyAllocationUsd: 10000,
+    budgetMonthlyAllocationNgn: 15000000,
     budgetMonthlyUsd: 10000,
     budgetMonthlyNgn: 15000000,
     allowedCapabilities: [
@@ -260,6 +438,8 @@ export const CANONICAL_DEPARTMENTS: Department[] = [
     description: 'Deep market analysis, competitive intelligence, algorithmic tokenomics, and intelligence dossiers',
     directorId: '00000000-0000-0000-0000-000000000020',
     directorCode: 'RES-DIR',
+    budgetMonthlyAllocationUsd: 7000,
+    budgetMonthlyAllocationNgn: 10500000,
     budgetMonthlyUsd: 7000,
     budgetMonthlyNgn: 10500000,
     allowedCapabilities: [
@@ -279,6 +459,8 @@ export const CANONICAL_DEPARTMENTS: Department[] = [
     description: 'Multi-tier circuit breakers, credential protection, RBAC/ABAC enforcement, and audit trail validation',
     directorId: '00000000-0000-0000-0000-000000000022',
     directorCode: 'SEC-CISO',
+    budgetMonthlyAllocationUsd: 15000,
+    budgetMonthlyAllocationNgn: 22500000,
     budgetMonthlyUsd: 15000,
     budgetMonthlyNgn: 22500000,
     allowedCapabilities: [
