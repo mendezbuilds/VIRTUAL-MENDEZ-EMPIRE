@@ -641,6 +641,14 @@ export class ConsequentialPolicyEngine {
     }
   }
 
+  /**
+   * Synchronous accessor to in-memory policy authorization records.
+   * Enables immediate verification of engine confirmation.
+   */
+  getRequestRecord(id: string): ConsequentialAuthorizationRecord | undefined {
+    return this.inMemoryRecords.get(id);
+  }
+
   async getPendingRequests(): Promise<ConsequentialAuthorizationRecord[]> {
     if (this.pool) {
       const client = await this.pool.connect();

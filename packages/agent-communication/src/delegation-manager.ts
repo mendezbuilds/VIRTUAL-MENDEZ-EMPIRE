@@ -10,6 +10,7 @@ import type { MessageRouter } from './message-router.js';
 import {
   ConsequentialPolicyEngine,
   type ConsequentialActionType,
+  type ConsequentialAuthorizationRecord,
   computeParameterHash,
   ConsequentialPolicyViolationError,
   UnauthorizedOwnerDecisionError,
@@ -36,6 +37,7 @@ export { UnauthorizedOwnerDecisionError };
 
 export class DelegationManager {
   private pendingOwnerApprovals: OwnerAuthorizationRequest[] = [];
+  private confirmedPolicyApprovals = new Map<string, ConsequentialAuthorizationRecord>();
   public readonly policyEngine: ConsequentialPolicyEngine;
 
   constructor(
@@ -126,16 +128,16 @@ export class DelegationManager {
    * Resolves an Owner authorization request.
    * Strictly enforces that only the authentic Owner principal can authorize consequential actions.
    * Requires a valid OwnerAuthenticatedSession or signed token.
-   * Routes authorization exclusively through ConsequentialPolicyEngine.resolveAuthorization().
-   * Does NOT update approval status locally before cryptographic verification succeeds.
-   * Ensures invalid authentication leaves the request unchanged.
+   * Awaits ConsequentialPolicyEngine.resolveAuthorization() BEFORE changing any local request fields.
+   * Only synchronizes local status and decision details after the policy engine successfully returns an approved/rejected record.
+   * If policy resolution fails for any reason, leaves the local request completely unchanged.
    */
-  authorizeAction(
+  async authorizeAction(
     requestId: string,
     decision: 'APPROVED' | 'REJECTED',
     auth: OwnerAuthenticatedSession | string,
     decisionNotes?: string
-  ): OwnerAuthorizationRequest & Promise<OwnerAuthorizationRequest> {
+  ): Promise<OwnerAuthorizationRequest> {
     const request = this.pendingOwnerApprovals.find((r) => r.id === requestId);
     if (!request) {
       throw new Error(`Owner authorization request with id '${requestId}' not found.`);
@@ -155,53 +157,45 @@ export class DelegationManager {
       );
     }
 
-    // 4 & 5. Do not update approval status locally before cryptographic verification succeeds.
-    // Ensure invalid authentication leaves the request unchanged.
-    // Cryptographically verify session against OwnerAuthenticationService synchronously:
-    const claims = this.policyEngine.authService.verifyOwnerSession(auth);
+    // Ensure the record is registered in policyEngine before resolving
+    let record = await this.policyEngine.getRequestById(requestId);
+    if (!record) {
+      await this.policyEngine.quarantineAction({
+        id: request.id,
+        taskId: request.taskId,
+        actionType: request.actionType,
+        agentId: request.agentId,
+        departmentId: request.departmentId as DepartmentId,
+        payload: request.payload,
+      });
+    }
 
-    // 3. Route authorization exclusively through ConsequentialPolicyEngine.resolveAuthorization()
-    const executeResolution = async () => {
-      let record = await this.policyEngine.getRequestById(requestId);
-      if (!record) {
-        await this.policyEngine.quarantineAction({
-          id: request.id,
-          taskId: request.taskId,
-          actionType: request.actionType,
-          agentId: request.agentId,
-          departmentId: request.departmentId as DepartmentId,
-          payload: request.payload,
-        });
-      }
+    // 2. Await ConsequentialPolicyEngine.resolveAuthorization() BEFORE changing any local request fields.
+    // If resolveAuthorization fails for ANY reason (cryptographic signature failure, expired session,
+    // revoked session, unregistered session, validity window expiration, etc.), it will throw here,
+    // and local request fields remain completely unchanged ('PENDING_OWNER_REVIEW').
+    const resolvedRecord = await this.policyEngine.resolveAuthorization(
+      requestId,
+      decision,
+      auth,
+      decisionNotes
+    );
 
-      const resolvedRecord = await this.policyEngine.resolveAuthorization(
-        requestId,
-        decision,
-        auth,
-        decisionNotes
-      );
+    // 3. Only synchronize local status and decision details after policy engine successfully returns
+    request.status = resolvedRecord.status;
+    request.decidedBy = resolvedRecord.decidedBy;
+    request.decisionNotes = resolvedRecord.decisionNotes;
+    request.decidedAt = resolvedRecord.decidedAt;
 
-      request.status = resolvedRecord.status;
-      request.decidedBy = resolvedRecord.decidedBy;
-      request.decisionNotes = resolvedRecord.decisionNotes;
-      request.decidedAt = resolvedRecord.decidedAt;
-      return request;
-    };
+    this.confirmedPolicyApprovals.set(requestId, resolvedRecord);
 
-    const resolutionPromise = executeResolution();
-
-    // After cryptographic verification succeeds, synchronize local request status
-    request.status = decision;
-    request.decidedBy = claims.principalId;
-    request.decisionNotes = decisionNotes;
-    request.decidedAt = new Date().toISOString();
-
-    return Object.assign(resolutionPromise, request);
+    return request;
   }
 
   /**
    * Step 6 of Consequential Action Lifecycle: Revalidates that an authorized request
-   * has not expired and that the parameters to execute cryptographically match the authorized hash.
+   * has not expired, that the parameters to execute cryptographically match the authorized hash,
+   * and that the policy engine has confirmed approval (eliminating local status tampering bypass).
    */
   revalidateConsequentialAction(
     requestId: string,
@@ -211,6 +205,22 @@ export class DelegationManager {
     if (!request) {
       throw new ConsequentialPolicyViolationError(
         `Owner authorization request '${requestId}' not found for revalidation.`
+      );
+    }
+
+    // 5. Ensure revalidateConsequentialAction() cannot authorize execution based solely on local status
+    // when the policy engine has not confirmed approval.
+    if (!this.policyEngine) {
+      throw new ConsequentialPolicyViolationError(
+        `Cannot execute consequential action ${requestId}: ConsequentialPolicyEngine is not configured.`
+      );
+    }
+
+    const policyRecord =
+      this.confirmedPolicyApprovals.get(requestId) ?? this.policyEngine.getRequestRecord(requestId);
+    if (!policyRecord || policyRecord.status !== 'APPROVED') {
+      throw new ConsequentialPolicyViolationError(
+        `Cannot execute consequential action ${requestId}: policy engine has not confirmed approval (current engine status: '${policyRecord?.status ?? 'UNREGISTERED'}'). Local status alone cannot authorize execution.`
       );
     }
 
@@ -227,13 +237,25 @@ export class DelegationManager {
       );
     }
 
-    if (request.parameterHash) {
-      const currentHash = computeParameterHash(payloadToExecute);
-      if (currentHash !== request.parameterHash) {
-        throw new ConsequentialPolicyViolationError(
-          `Cryptographic parameter hash mismatch! Authorized hash '${request.parameterHash}' does not match execution payload hash '${currentHash}'. Parameter tampering detected.`
-        );
-      }
+    if (policyRecord.validUntil && new Date(policyRecord.validUntil).getTime() < Date.now()) {
+      request.status = 'EXPIRED';
+      policyRecord.status = 'EXPIRED';
+      throw new ConsequentialPolicyViolationError(
+        `Cannot execute consequential action ${requestId}: policy engine authorization has expired.`
+      );
+    }
+
+    const currentHash = computeParameterHash(payloadToExecute);
+    if (request.parameterHash && currentHash !== request.parameterHash) {
+      throw new ConsequentialPolicyViolationError(
+        `Cryptographic parameter hash mismatch! Authorized hash '${request.parameterHash}' does not match execution payload hash '${currentHash}'. Parameter tampering detected.`
+      );
+    }
+
+    if (policyRecord.parameterHash && currentHash !== policyRecord.parameterHash) {
+      throw new ConsequentialPolicyViolationError(
+        `Cryptographic parameter hash mismatch! Policy engine authorized hash '${policyRecord.parameterHash}' does not match execution payload hash '${currentHash}'. Parameter tampering detected.`
+      );
     }
 
     return request;

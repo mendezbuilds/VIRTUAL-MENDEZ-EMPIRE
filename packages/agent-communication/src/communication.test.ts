@@ -117,7 +117,7 @@ describe('@vme/agent-communication Corporate Delegation & Messaging', () => {
     expect(pendingList[0]?.actionType).toBe('EXTERNAL_OUTREACH');
   });
 
-  it('enforces that only the authentic Owner principal with cryptographic session can approve consequential actions', () => {
+  it('enforces that only the authentic Owner principal with cryptographic session can approve consequential actions', async () => {
     const outreachBot = hierarchy.getAgentRecord('OPP-OUTR')!;
     const ceo = hierarchy.getAgentRecord('EXEC-CEO')!;
     const taskId = randomUUID();
@@ -130,21 +130,21 @@ describe('@vme/agent-communication Corporate Delegation & Messaging', () => {
     );
 
     // AI agent attempting to approve throws UnauthorizedOwnerDecisionError and leaves request unchanged
-    expect(() => {
-      delegation.authorizeAction(request.id, 'APPROVED', ceo.id, 'CEO self-approval');
-    }).toThrow(UnauthorizedOwnerDecisionError);
+    await expect(
+      delegation.authorizeAction(request.id, 'APPROVED', ceo.id, 'CEO self-approval')
+    ).rejects.toThrow(UnauthorizedOwnerDecisionError);
     expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
 
     // Identity-only authentication (passing OWNER_PRINCIPAL_ID string) is strictly rejected and leaves request unchanged
-    expect(() => {
-      delegation.authorizeAction(request.id, 'APPROVED', OWNER_PRINCIPAL_ID, 'Identity string attempt');
-    }).toThrow(UnauthorizedOwnerDecisionError);
+    await expect(
+      delegation.authorizeAction(request.id, 'APPROVED', OWNER_PRINCIPAL_ID, 'Identity string attempt')
+    ).rejects.toThrow(UnauthorizedOwnerDecisionError);
     expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
 
     // Arbitrary identity string is strictly rejected and leaves request unchanged
-    expect(() => {
-      delegation.authorizeAction(request.id, 'APPROVED', 'Stephen Mendez', 'Name string attempt');
-    }).toThrow(UnauthorizedOwnerDecisionError);
+    await expect(
+      delegation.authorizeAction(request.id, 'APPROVED', 'Stephen Mendez', 'Name string attempt')
+    ).rejects.toThrow(UnauthorizedOwnerDecisionError);
     expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
 
     // Legitimate Owner approval with cryptographic session succeeds
@@ -154,7 +154,7 @@ describe('@vme/agent-communication Corporate Delegation & Messaging', () => {
       credentials: testCreds,
     });
 
-    const approved = delegation.authorizeAction(
+    const approved = await delegation.authorizeAction(
       request.id,
       'APPROVED',
       ownerSession,

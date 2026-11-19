@@ -12,6 +12,7 @@ import {
   OwnerAuthenticationService,
   ConsequentialPolicyEngine,
   UnauthorizedOwnerDecisionError,
+  ConsequentialPolicyViolationError,
   type OwnerAuthenticatedSession,
   type OwnerSessionClaims,
 } from './consequential-policy-engine.js';
@@ -399,7 +400,7 @@ describe('Owner Cryptographic Authentication & Governance Verification', () => {
       delegation = new DelegationManager(hierarchy, router, policyEngine);
     });
 
-    it('rejects OWNER_PRINCIPAL_ID string through DelegationManager and leaves request unchanged', () => {
+    it('rejects OWNER_PRINCIPAL_ID string through DelegationManager and leaves request unchanged', async () => {
       const { request } = delegation.interceptConsequentialAction(
         'FIN-FXA',
         randomUUID(),
@@ -407,14 +408,14 @@ describe('Owner Cryptographic Authentication & Governance Verification', () => {
         { amount: 50000 }
       );
 
-      expect(() =>
+      await expect(
         delegation.authorizeAction(request.id, 'APPROVED', OWNER_PRINCIPAL_ID)
-      ).toThrow(UnauthorizedOwnerDecisionError);
+      ).rejects.toThrow(UnauthorizedOwnerDecisionError);
 
       expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
     });
 
-    it('rejects arbitrary identity strings through DelegationManager and leaves request unchanged', () => {
+    it('rejects arbitrary identity strings through DelegationManager and leaves request unchanged', async () => {
       const { request } = delegation.interceptConsequentialAction(
         'FIN-FXA',
         randomUUID(),
@@ -422,18 +423,18 @@ describe('Owner Cryptographic Authentication & Governance Verification', () => {
         { symbol: 'AAPL', qty: 100 }
       );
 
-      expect(() =>
+      await expect(
         delegation.authorizeAction(request.id, 'APPROVED', 'EXEC-CEO')
-      ).toThrow(UnauthorizedOwnerDecisionError);
+      ).rejects.toThrow(UnauthorizedOwnerDecisionError);
       expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
 
-      expect(() =>
+      await expect(
         delegation.authorizeAction(request.id, 'APPROVED', 'stephen@virtualmendezempire.internal')
-      ).toThrow(UnauthorizedOwnerDecisionError);
+      ).rejects.toThrow(UnauthorizedOwnerDecisionError);
       expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
     });
 
-    it('rejects forged, expired, and revoked tokens through DelegationManager and leaves request unchanged', () => {
+    it('rejects forged, expired, and revoked tokens through DelegationManager and leaves request unchanged', async () => {
       const { request } = delegation.interceptConsequentialAction(
         'OPS-DIR',
         randomUUID(),
@@ -450,9 +451,9 @@ describe('Owner Cryptographic Authentication & Governance Verification', () => {
       const [payloadB64] = session.token.split('.');
       const forgedToken = `${payloadB64}.0000000000000000000000000000000000000000000000000000000000000000`;
 
-      expect(() =>
+      await expect(
         delegation.authorizeAction(request.id, 'APPROVED', forgedToken)
-      ).toThrow(UnauthorizedOwnerDecisionError);
+      ).rejects.toThrow(UnauthorizedOwnerDecisionError);
       expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
 
       // Expired token
@@ -462,25 +463,70 @@ describe('Owner Cryptographic Authentication & Governance Verification', () => {
         credentials: validCredentials,
         sessionDurationMs: -1000,
       });
-      expect(() =>
+      await expect(
         delegation.authorizeAction(request.id, 'APPROVED', expiredSession)
-      ).toThrow(UnauthorizedOwnerDecisionError);
+      ).rejects.toThrow(UnauthorizedOwnerDecisionError);
       expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
 
       // Revoked token
       authService.revokeSession(session.sessionId);
-      expect(() =>
+      await expect(
         delegation.authorizeAction(request.id, 'APPROVED', session)
-      ).toThrow(UnauthorizedOwnerDecisionError);
+      ).rejects.toThrow(UnauthorizedOwnerDecisionError);
       expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
     });
 
-    it('successfully authorizes consequential action through DelegationManager with valid Owner session', () => {
+    it('proves policy-resolution failures leave request pending and cannot pass revalidation', async () => {
+      const payload = { amount: 75000, recipient: '0xabc' };
       const { request } = delegation.interceptConsequentialAction(
         'FIN-FXA',
         randomUUID(),
         'CAPITAL_TRANSFER',
-        { amount: 25000 }
+        payload
+      );
+
+      // Forged token resolution fails
+      const forgedToken = 'fakeHeader.fakeSignature';
+      await expect(
+        delegation.authorizeAction(request.id, 'APPROVED', forgedToken)
+      ).rejects.toThrow(UnauthorizedOwnerDecisionError);
+
+      // Request must remain strictly PENDING_OWNER_REVIEW
+      expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
+
+      // Revalidation MUST fail because request was not approved by policy engine
+      expect(() =>
+        delegation.revalidateConsequentialAction(request.id, payload)
+      ).toThrow(ConsequentialPolicyViolationError);
+      expect(() =>
+        delegation.revalidateConsequentialAction(request.id, payload)
+      ).toThrow(/policy engine has not confirmed approval/);
+    });
+
+    it('proves policy resolution failure on expired validity window leaves request pending and fails revalidation', async () => {
+      const payload = { symbol: 'TSLA', amount: 1000 };
+      const shortEngine = new ConsequentialPolicyEngine({
+        authService,
+        policies: {
+          LIVE_TRADING: {
+            actionType: 'LIVE_TRADING',
+            requiresOwnerApproval: true,
+            maxValidityWindowMs: -1000, // already expired
+            description: 'Expired test policy',
+          },
+        },
+      });
+
+      const hierarchy = new DepartmentRegistry();
+      const supervisor = new EmergencySupervisor(undefined, false);
+      const router = new MessageRouter(hierarchy, { emergencySupervisor: supervisor });
+      const shortDelegation = new DelegationManager(hierarchy, router, shortEngine);
+
+      const { request } = shortDelegation.interceptConsequentialAction(
+        'FIN-FXA',
+        randomUUID(),
+        'LIVE_TRADING',
+        payload
       );
 
       const ownerSession = authService.createOwnerSession({
@@ -489,7 +535,57 @@ describe('Owner Cryptographic Authentication & Governance Verification', () => {
         credentials: validCredentials,
       });
 
-      const approved = delegation.authorizeAction(
+      // Attempting to authorize expired request fails in policy engine
+      await expect(
+        shortDelegation.authorizeAction(request.id, 'APPROVED', ownerSession)
+      ).rejects.toThrow(ConsequentialPolicyViolationError);
+
+      // Local request remains PENDING_OWNER_REVIEW (not APPROVED)
+      expect(shortDelegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
+
+      // Revalidation must fail
+      expect(() =>
+        shortDelegation.revalidateConsequentialAction(request.id, payload)
+      ).toThrow(ConsequentialPolicyViolationError);
+    });
+
+    it('ensures revalidateConsequentialAction cannot authorize execution based solely on local status when engine has not confirmed', () => {
+      const payload = { amount: 100000 };
+      const { request } = delegation.interceptConsequentialAction(
+        'FIN-FXA',
+        randomUUID(),
+        'CAPITAL_TRANSFER',
+        payload
+      );
+
+      // Simulate unauthorized local state tampering (e.g. bypassing authorizeAction)
+      request.status = 'APPROVED';
+
+      // revalidateConsequentialAction MUST detect that policy engine has not confirmed approval
+      expect(() =>
+        delegation.revalidateConsequentialAction(request.id, payload)
+      ).toThrow(ConsequentialPolicyViolationError);
+      expect(() =>
+        delegation.revalidateConsequentialAction(request.id, payload)
+      ).toThrow(/policy engine has not confirmed approval/);
+    });
+
+    it('successfully authorizes consequential action through DelegationManager with valid Owner session and passes revalidation', async () => {
+      const payload = { amount: 25000 };
+      const { request } = delegation.interceptConsequentialAction(
+        'FIN-FXA',
+        randomUUID(),
+        'CAPITAL_TRANSFER',
+        payload
+      );
+
+      const ownerSession = authService.createOwnerSession({
+        principalId: OWNER_PRINCIPAL_ID,
+        email: CANONICAL_OWNER_PRINCIPAL.email,
+        credentials: validCredentials,
+      });
+
+      const approved = await delegation.authorizeAction(
         request.id,
         'APPROVED',
         ownerSession,
@@ -499,14 +595,19 @@ describe('Owner Cryptographic Authentication & Governance Verification', () => {
       expect(approved.status).toBe('APPROVED');
       expect(approved.decidedBy).toBe(OWNER_PRINCIPAL_ID);
       expect(delegation.getRequestById(request.id)?.status).toBe('APPROVED');
+
+      // Revalidation succeeds with confirmed engine approval
+      const revalidated = delegation.revalidateConsequentialAction(request.id, payload);
+      expect(revalidated.status).toBe('APPROVED');
     });
 
-    it('successfully authorizes consequential action through DelegationManager with raw signed token string', () => {
+    it('successfully authorizes consequential action through DelegationManager with raw signed token string', async () => {
+      const payload = { amount: 15000 };
       const { request } = delegation.interceptConsequentialAction(
         'FIN-FXA',
         randomUUID(),
         'CAPITAL_TRANSFER',
-        { amount: 15000 }
+        payload
       );
 
       const ownerSession = authService.createOwnerSession({
@@ -515,7 +616,7 @@ describe('Owner Cryptographic Authentication & Governance Verification', () => {
         credentials: validCredentials,
       });
 
-      const approved = delegation.authorizeAction(
+      const approved = await delegation.authorizeAction(
         request.id,
         'APPROVED',
         ownerSession.token,

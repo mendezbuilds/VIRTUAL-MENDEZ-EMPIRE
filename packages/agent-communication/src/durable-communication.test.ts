@@ -397,7 +397,7 @@ describe('Durable Agent Communication & Consequential Policy Lifecycle', () => {
       ).rejects.toThrow(ConsequentialPolicyViolationError);
     });
 
-    it('DelegationManager revalidateConsequentialAction detects parameter tampering', () => {
+    it('DelegationManager revalidateConsequentialAction detects parameter tampering', async () => {
       const scout = hierarchy.getAgentRecord('OPP-OUTR')!;
       const taskId = randomUUID();
       const payload = {
@@ -418,7 +418,7 @@ describe('Durable Agent Communication & Consequential Policy Lifecycle', () => {
         email: CANONICAL_OWNER_PRINCIPAL.email,
         credentials: testOwnerCredentials,
       });
-      delegation.authorizeAction(request.id, 'APPROVED', ownerSession);
+      await delegation.authorizeAction(request.id, 'APPROVED', ownerSession);
 
       // Altered recipient should be detected
       const alteredPayload = {
