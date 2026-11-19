@@ -149,15 +149,14 @@ describe('ToolExecutionRuntime — Consequential Action Approval Binding & Repla
   });
 
   it('3. Prevents operation substitution: approval granted for operation A cannot be used for operation B', async () => {
-    // Register custom tool with distinct operations
+    // Register custom tool with distinct operations where both are consequential
     let executedOperation = '';
     runtime.registerTool({
       name: 'financial_ledger_tool',
       description: 'Performs balance audits or irreversible ledger adjustments',
       requiredCapability: 'software_architecture',
       departmentScope: 'technology_engineering',
-      consequentialType: (input: { operation?: string }) =>
-        input.operation === 'ADJUST' ? 'IRREVERSIBLE_OPERATION' : null,
+      consequentialType: 'IRREVERSIBLE_OPERATION',
       execute: async (input: { operation: string; account: string; amount: number }) => {
         executedOperation = input.operation;
         return { success: true, operation: input.operation };
@@ -189,7 +188,7 @@ describe('ToolExecutionRuntime — Consequential Action Approval Binding & Repla
     });
     await policyEngine.resolveAuthorization(approvalRequestId!, 'APPROVED', ownerSession);
 
-    // Step C: Attacker attempts operation substitution with 'RESET' or 'AUDIT' using the ADJUST approval
+    // Step C: Attacker attempts operation substitution with 'RESET' using the ADJUST approval
     const substitutedPayload = {
       operation: 'RESET',
       account: 'ACC-001',
@@ -242,7 +241,6 @@ describe('ToolExecutionRuntime — Consequential Action Approval Binding & Repla
   });
 
   it('5. Ensures atomic approval consumption and blocks concurrent replay attempts', async () => {
-    // Create physical file in sandbox to delete
     const targetFile = 'to_delete_concurrent.txt';
     writeFileSync(join(testSandboxDir, targetFile), 'Content to delete');
 
@@ -267,7 +265,7 @@ describe('ToolExecutionRuntime — Consequential Action Approval Binding & Repla
     });
     await policyEngine.resolveAuthorization(approvalRequestId!, 'APPROVED', ownerSession);
 
-    // Trigger concurrent executions simultaneously
+    // Trigger concurrent executions simultaneously on the same runtime
     const results = await Promise.allSettled([
       runtime.executeTool('real_filesystem', payload, defaultContext, {
         approvalRequestId: approvalRequestId!,
@@ -392,7 +390,6 @@ describe('ToolExecutionRuntime — Consequential Action Approval Binding & Repla
       credentials,
     });
 
-    // Attempt to authorize expired request fails or revalidating it fails closed
     await expect(
       shortPolicyEngine.resolveAuthorization(expiredReqId!, 'APPROVED', ownerSession)
     ).rejects.toThrow(/expired/i);
@@ -402,5 +399,188 @@ describe('ToolExecutionRuntime — Consequential Action Approval Binding & Repla
         approvalRequestId: expiredReqId!,
       })
     ).rejects.toThrow(/approval .* status is 'PENDING_OWNER_REVIEW'|expired/i);
+  });
+
+  it('8. Rejects unclassified tool attempting to consume an existing approval', async () => {
+    // Quarantine and approve an action for real_filesystem delete
+    const payload = {
+      action: 'delete',
+      relativePath: 'to_delete_test8.txt',
+    };
+
+    let approvalRequestId: string | undefined;
+    try {
+      await runtime.executeTool('real_filesystem', payload, defaultContext);
+    } catch (err: unknown) {
+      if (err instanceof QuarantinedActionError) {
+        approvalRequestId = err.approvalRequest.id;
+      }
+    }
+    expect(approvalRequestId).toBeDefined();
+
+    const ownerSession = authService.createOwnerSession({
+      principalId: OWNER_PRINCIPAL_ID,
+      email: CANONICAL_OWNER_PRINCIPAL.email,
+      credentials,
+    });
+    await policyEngine.resolveAuthorization(approvalRequestId!, 'APPROVED', ownerSession);
+
+    // Attempt to execute an unclassified tool ('market_scraper') with the approval
+    await expect(
+      runtime.executeTool('market_scraper', { keywords: ['Rust'] }, defaultContext, {
+        approvalRequestId: approvalRequestId!,
+      })
+    ).rejects.toThrow(
+      /cannot be used to authorize tool 'market_scraper': action is unclassified and does not require or accept consequential authorization/i
+    );
+
+    // Attempt to execute an unclassified filesystem read action with the approval
+    await expect(
+      runtime.executeTool(
+        'real_filesystem',
+        { action: 'read', relativePath: 'some_file.txt' },
+        defaultContext,
+        { approvalRequestId: approvalRequestId! }
+      )
+    ).rejects.toThrow(/action is unclassified and does not require or accept consequential authorization/i);
+  });
+
+  it('9. Rejects approval records with missing or malformed tool or operation binding', async () => {
+    const ownerSession = authService.createOwnerSession({
+      principalId: OWNER_PRINCIPAL_ID,
+      email: CANONICAL_OWNER_PRINCIPAL.email,
+      credentials,
+    });
+
+    // Case A: Missing tool binding
+    const missingToolRecord = await policyEngine.quarantineAction({
+      taskId: 'task-malformed-001',
+      actionType: 'IRREVERSIBLE_OPERATION',
+      agentId: defaultContext.agentId,
+      departmentId: defaultContext.departmentId,
+      payload: {
+        operation: 'delete',
+        parameters: { action: 'delete', relativePath: 'file.txt' },
+      },
+    });
+    await policyEngine.resolveAuthorization(missingToolRecord.id, 'APPROVED', ownerSession);
+
+    await expect(
+      runtime.executeTool(
+        'real_filesystem',
+        { action: 'delete', relativePath: 'file.txt' },
+        defaultContext,
+        { approvalRequestId: missingToolRecord.id }
+      )
+    ).rejects.toThrow(/is missing required tool binding/i);
+
+    // Case B: Missing operation binding
+    const missingOpRecord = await policyEngine.quarantineAction({
+      taskId: 'task-malformed-002',
+      actionType: 'IRREVERSIBLE_OPERATION',
+      agentId: defaultContext.agentId,
+      departmentId: defaultContext.departmentId,
+      payload: {
+        tool: 'real_filesystem',
+        parameters: { action: 'delete', relativePath: 'file.txt' },
+      },
+    });
+    await policyEngine.resolveAuthorization(missingOpRecord.id, 'APPROVED', ownerSession);
+
+    await expect(
+      runtime.executeTool(
+        'real_filesystem',
+        { action: 'delete', relativePath: 'file.txt' },
+        defaultContext,
+        { approvalRequestId: missingOpRecord.id }
+      )
+    ).rejects.toThrow(/is missing required operation binding/i);
+
+    // Case C: Missing parameters object
+    const missingParamsRecord = await policyEngine.quarantineAction({
+      taskId: 'task-malformed-003',
+      actionType: 'IRREVERSIBLE_OPERATION',
+      agentId: defaultContext.agentId,
+      departmentId: defaultContext.departmentId,
+      payload: {
+        tool: 'real_filesystem',
+        operation: 'delete',
+      },
+    });
+    await policyEngine.resolveAuthorization(missingParamsRecord.id, 'APPROVED', ownerSession);
+
+    await expect(
+      runtime.executeTool(
+        'real_filesystem',
+        { action: 'delete', relativePath: 'file.txt' },
+        defaultContext,
+        { approvalRequestId: missingParamsRecord.id }
+      )
+    ).rejects.toThrow(/is missing required parameters object/i);
+  });
+
+  it('10. Ensures two separate runtime instances concurrently attempting to consume the same approval transition exactly once', async () => {
+    // Two separate runtime instances sharing the same policy engine
+    const runtime1 = new ToolExecutionRuntime(hierarchy, {
+      emergencySupervisor: supervisor,
+      workspaceRoot: testSandboxDir,
+      policyEngine,
+    });
+
+    const runtime2 = new ToolExecutionRuntime(hierarchy, {
+      emergencySupervisor: supervisor,
+      workspaceRoot: testSandboxDir,
+      policyEngine,
+    });
+
+    const targetFile = 'shared_target.txt';
+    writeFileSync(join(testSandboxDir, targetFile), 'Shared target content');
+
+    const payload = {
+      action: 'delete',
+      relativePath: targetFile,
+    };
+
+    let approvalRequestId: string | undefined;
+    try {
+      await runtime1.executeTool('real_filesystem', payload, defaultContext);
+    } catch (err: unknown) {
+      if (err instanceof QuarantinedActionError) {
+        approvalRequestId = err.approvalRequest.id;
+      }
+    }
+    expect(approvalRequestId).toBeDefined();
+
+    const ownerSession = authService.createOwnerSession({
+      principalId: OWNER_PRINCIPAL_ID,
+      email: CANONICAL_OWNER_PRINCIPAL.email,
+      credentials,
+    });
+    await policyEngine.resolveAuthorization(approvalRequestId!, 'APPROVED', ownerSession);
+
+    // Concurrently invoke execution on both runtime instances simultaneously
+    const results = await Promise.allSettled([
+      runtime1.executeTool('real_filesystem', payload, defaultContext, {
+        approvalRequestId: approvalRequestId!,
+      }),
+      runtime2.executeTool('real_filesystem', payload, defaultContext, {
+        approvalRequestId: approvalRequestId!,
+      }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+
+    // Exactly one instance must succeed, the other MUST fail closed
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+
+    const errorMsg = (rejected[0] as PromiseRejectedResult).reason.message;
+    expect(errorMsg).toMatch(/concurrent execution detected|already been executed|already locked/i);
+
+    // Verify policy engine record transitioned to EXECUTED exactly once
+    const finalRecord = await policyEngine.getRequestById(approvalRequestId!);
+    expect(finalRecord?.status).toBe('EXECUTED');
+    expect(finalRecord?.executionStatus).toBe('SUCCESS');
   });
 });

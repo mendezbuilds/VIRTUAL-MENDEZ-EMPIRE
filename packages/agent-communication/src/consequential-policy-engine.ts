@@ -402,6 +402,7 @@ export interface ConsequentialPolicyEngineOptions {
  */
 export class ConsequentialPolicyEngine {
   private inMemoryRecords = new Map<string, ConsequentialAuthorizationRecord>();
+  private inMemoryClaimLocks = new Set<string>();
   private readonly pool?: Pool;
   private readonly tenantId: string;
   private readonly policies: Record<ConsequentialActionType, ConsequentialPolicyRule>;
@@ -594,18 +595,68 @@ export class ConsequentialPolicyEngine {
 
   /**
    * Atomically claims an approved authorization request for execution, preventing concurrent replay.
+   * Guarantees that a request transitions from APPROVED to EXECUTED exactly once,
+   * even across concurrent attempts or multiple runtime instances sharing this policy engine.
    */
   async claimApprovalForExecution(
     requestId: string,
     payloadToExecute: Record<string, unknown>
   ): Promise<ConsequentialAuthorizationRecord> {
-    const record = await this.revalidateForExecution(requestId, payloadToExecute);
+    if (this.inMemoryClaimLocks.has(requestId)) {
+      throw new ConsequentialPolicyViolationError(
+        `Concurrent execution detected: Approval ${requestId} is already being claimed or executed.`
+      );
+    }
+    this.inMemoryClaimLocks.add(requestId);
 
-    record.status = 'EXECUTED';
-    record.executedAt = new Date().toISOString();
-    record.executionStatus = 'PENDING_COMPLETION';
+    try {
+      if (!this.pool) {
+        // Synchronous atomic check and transition in in-memory mode
+        const record = this.inMemoryRecords.get(requestId);
+        if (!record) {
+          throw new ConsequentialPolicyViolationError(
+            `Authorization request not found for revalidation: ${requestId}`
+          );
+        }
 
-    if (this.pool) {
+        if (record.status === 'EXECUTED') {
+          throw new ConsequentialPolicyViolationError(
+            `Replay attack prevented: Consequential action ${requestId} has already been executed.`
+          );
+        }
+
+        if (record.status !== 'APPROVED') {
+          throw new ConsequentialPolicyViolationError(
+            `Cannot execute consequential action ${requestId}: status is '${record.status}'. Owner approval is required.`
+          );
+        }
+
+        if (new Date(record.validUntil).getTime() < Date.now()) {
+          record.status = 'EXPIRED';
+          throw new ConsequentialPolicyViolationError(
+            `Cannot execute consequential action ${requestId}: approval has expired.`
+          );
+        }
+
+        const currentHash = computeParameterHash(payloadToExecute);
+        if (currentHash !== record.parameterHash) {
+          throw new ConsequentialPolicyViolationError(
+            `Cryptographic parameter hash mismatch! Authorized hash '${record.parameterHash}' does not match execution payload hash '${currentHash}'. Parameter tampering detected.`
+          );
+        }
+
+        record.status = 'EXECUTED';
+        record.executedAt = new Date().toISOString();
+        record.executionStatus = 'PENDING_COMPLETION';
+        this.inMemoryRecords.set(requestId, record);
+
+        return record;
+      }
+
+      // PostgreSQL mode with conditional update
+      const record = await this.revalidateForExecution(requestId, payloadToExecute);
+      const executedAt = new Date().toISOString();
+
       const client = await this.pool.connect();
       try {
         const res = await client.query(
@@ -613,7 +664,7 @@ export class ConsequentialPolicyEngine {
            SET status = 'EXECUTED', executed_at = $1, execution_status = 'PENDING_COMPLETION'
            WHERE id = $2 AND tenant_id = $3 AND status = 'APPROVED'
            RETURNING id`,
-          [record.executedAt, requestId, this.tenantId]
+          [executedAt, requestId, this.tenantId]
         );
         if (res.rows.length === 0) {
           throw new ConsequentialPolicyViolationError(
@@ -623,11 +674,15 @@ export class ConsequentialPolicyEngine {
       } finally {
         client.release();
       }
-    } else {
-      this.inMemoryRecords.set(requestId, record);
-    }
 
-    return record;
+      record.status = 'EXECUTED';
+      record.executedAt = executedAt;
+      record.executionStatus = 'PENDING_COMPLETION';
+
+      return record;
+    } finally {
+      this.inMemoryClaimLocks.delete(requestId);
+    }
   }
 
   /**

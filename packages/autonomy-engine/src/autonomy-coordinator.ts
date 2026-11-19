@@ -78,6 +78,13 @@ export class AutonomyCoordinator {
       if (consequentialClassification) {
         const specialist = this.findAgentForTask(task);
         if (specialist) {
+          if (!task.inputData.tool || !task.inputData.operation || !task.inputData.parameters) {
+            task.inputData = {
+              tool: 'dispatch_outreach_dossier',
+              operation: 'dispatch_outreach_dossier',
+              parameters: task.inputData,
+            };
+          }
           this.delegationManager.interceptConsequentialAction(
             specialist.id,
             task.id,

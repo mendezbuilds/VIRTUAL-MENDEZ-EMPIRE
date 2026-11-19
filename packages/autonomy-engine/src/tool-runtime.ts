@@ -235,7 +235,17 @@ export class ToolExecutionRuntime {
         throw new ToolExecutionError(`Tool '${toolName}' is not registered in the runtime.`);
       }
 
-      // 4. Agent and Capability Verification
+      // 4. Consequential Action Classification & Approval Guard
+      const classifiedActionType = this.classifyAction(toolName, tool, args);
+
+      // 1. Reject approval execution if classifyAction() returns null. An approval must never authorize an unclassified tool action.
+      if (approvalRequestId && !classifiedActionType) {
+        throw new ToolExecutionError(
+          `Approval '${approvalRequestId}' cannot be used to authorize tool '${toolName}': action is unclassified and does not require or accept consequential authorization.`
+        );
+      }
+
+      // 5. Agent and Capability Verification
       const agent = this.hierarchy.getAgentRecord(context.agentId);
       if (!agent) {
         throw new ToolExecutionError(`Agent '${context.agentId}' not found in corporate hierarchy.`);
@@ -250,9 +260,7 @@ export class ToolExecutionRuntime {
         );
       }
 
-      // 5. Centralized Consequential Action Policy Enforcement Point
-      const classifiedActionType = this.classifyAction(toolName, tool, args);
-
+      // 6. Centralized Consequential Action Policy Enforcement Point
       if ((classifiedActionType || approvalRequestId) && this.policyEngine) {
         if (!approvalRequestId) {
           // Quarantine the action immediately and cryptographically bind tool identifier, operation, and parameters
@@ -302,59 +310,68 @@ export class ToolExecutionRuntime {
           );
         }
 
-        // Check tool binding
-        const boundTool =
-          typeof record.payload?.tool === 'string'
-            ? record.payload.tool
-            : typeof record.payload?.toolName === 'string'
-              ? record.payload.toolName
-              : undefined;
+        // 3. Require exact equality for action type. Missing action type must fail closed.
+        if (!record.actionType || record.actionType !== classifiedActionType) {
+          throw new ToolExecutionError(
+            `Approval '${approvalRequestId}' action type '${record.actionType ?? 'MISSING'}' does not match required action type '${classifiedActionType}'. Action type mismatch rejected.`
+          );
+        }
 
-        if (boundTool && boundTool !== toolName) {
+        // 2. Require the approved record to contain a valid tool identifier, operation, and parameter object.
+        // Reject missing or malformed binding fields; do not fall back to validating raw args.
+        if (!record.payload || typeof record.payload !== 'object' || Array.isArray(record.payload)) {
+          throw new ToolExecutionError(
+            `Approval '${approvalRequestId}' has missing or malformed payload. Action rejected.`
+          );
+        }
+
+        const boundTool = record.payload.tool;
+        if (typeof boundTool !== 'string' || boundTool.trim().length === 0) {
+          throw new ToolExecutionError(
+            `Approval '${approvalRequestId}' is missing required tool binding. Malformed approval rejected.`
+          );
+        }
+
+        const boundOperation = record.payload.operation;
+        if (typeof boundOperation !== 'string' || boundOperation.trim().length === 0) {
+          throw new ToolExecutionError(
+            `Approval '${approvalRequestId}' is missing required operation binding. Malformed approval rejected.`
+          );
+        }
+
+        const boundParameters = record.payload.parameters;
+        if (!boundParameters || typeof boundParameters !== 'object' || Array.isArray(boundParameters)) {
+          throw new ToolExecutionError(
+            `Approval '${approvalRequestId}' is missing required parameters object. Malformed approval rejected.`
+          );
+        }
+
+        // 3. Require exact equality for tool and operation.
+        if (boundTool !== toolName) {
           throw new ToolExecutionError(
             `Approval '${approvalRequestId}' is cryptographically bound to tool '${boundTool}', but attempted execution with tool '${toolName}'. Tool substitution rejected.`
           );
         }
 
-        // Check operation binding
-        const boundOperation =
-          typeof record.payload?.operation === 'string'
-            ? record.payload.operation
-            : typeof record.payload?.action === 'string'
-              ? record.payload.action
-              : undefined;
-
-        if (boundOperation && boundOperation !== currentOperation) {
+        if (boundOperation !== currentOperation) {
           throw new ToolExecutionError(
             `Approval '${approvalRequestId}' is cryptographically bound to operation '${boundOperation}', but attempted execution with operation '${currentOperation}'. Operation substitution rejected.`
           );
         }
 
-        // Check action type consistency
-        if (classifiedActionType && record.actionType && record.actionType !== classifiedActionType) {
-          throw new ToolExecutionError(
-            `Approval '${approvalRequestId}' action type '${record.actionType}' does not match requested tool action type '${classifiedActionType}'. Cross-action substitution rejected.`
-          );
-        }
+        // Canonical execution parameters: extract parameters if args is wrapped, otherwise args directly
+        const executionParameters =
+          args && typeof args.parameters === 'object' && args.parameters !== null
+            ? (args.parameters as Record<string, unknown>)
+            : args;
 
-        // Determine canonical payload to verify against cryptographic parameterHash
-        let payloadToRevalidate: Record<string, unknown>;
-        if (
-          record.payload &&
-          'parameters' in record.payload &&
-          typeof record.payload.parameters === 'object' &&
-          record.payload.parameters !== null
-        ) {
-          payloadToRevalidate = {
-            tool: toolName,
-            operation: currentOperation,
-            parameters: args,
-          };
-        } else {
-          payloadToRevalidate = args;
-        }
+        const payloadToRevalidate = {
+          tool: toolName,
+          operation: currentOperation,
+          parameters: executionParameters,
+        };
 
-        // Atomically claim / consume the approval before tool execution starts
+        // 4. Atomically claim / consume the approval before tool execution starts
         if (typeof (this.policyEngine as any).claimApprovalForExecution === 'function') {
           await (this.policyEngine as any).claimApprovalForExecution(approvalRequestId, payloadToRevalidate);
         } else {
