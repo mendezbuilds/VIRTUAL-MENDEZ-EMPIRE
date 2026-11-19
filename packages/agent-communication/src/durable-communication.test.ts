@@ -426,12 +426,12 @@ describe('Durable Agent Communication & Consequential Policy Lifecycle', () => {
         content: 'Empire Q4 Pitch Deck',
       };
 
-      expect(() => {
-        delegation.revalidateConsequentialAction(request.id, alteredPayload);
-      }).toThrow(ConsequentialPolicyViolationError);
+      await expect(
+        delegation.revalidateConsequentialAction(request.id, alteredPayload)
+      ).rejects.toThrow(ConsequentialPolicyViolationError);
 
       // Original payload validates cleanly
-      const valid = delegation.revalidateConsequentialAction(request.id, payload);
+      const valid = await delegation.revalidateConsequentialAction(request.id, payload);
       expect(valid.status).toBe('APPROVED');
     });
   });

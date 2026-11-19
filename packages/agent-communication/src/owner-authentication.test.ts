@@ -495,12 +495,12 @@ describe('Owner Cryptographic Authentication & Governance Verification', () => {
       expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
 
       // Revalidation MUST fail because request was not approved by policy engine
-      expect(() =>
+      await expect(
         delegation.revalidateConsequentialAction(request.id, payload)
-      ).toThrow(ConsequentialPolicyViolationError);
-      expect(() =>
+      ).rejects.toThrow(ConsequentialPolicyViolationError);
+      await expect(
         delegation.revalidateConsequentialAction(request.id, payload)
-      ).toThrow(/policy engine has not confirmed approval/);
+      ).rejects.toThrow(/status is 'PENDING_OWNER_REVIEW'/);
     });
 
     it('proves policy resolution failure on expired validity window leaves request pending and fails revalidation', async () => {
@@ -544,12 +544,12 @@ describe('Owner Cryptographic Authentication & Governance Verification', () => {
       expect(shortDelegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
 
       // Revalidation must fail
-      expect(() =>
+      await expect(
         shortDelegation.revalidateConsequentialAction(request.id, payload)
-      ).toThrow(ConsequentialPolicyViolationError);
+      ).rejects.toThrow(ConsequentialPolicyViolationError);
     });
 
-    it('ensures revalidateConsequentialAction cannot authorize execution based solely on local status when engine has not confirmed', () => {
+    it('ensures revalidateConsequentialAction cannot authorize execution based solely on local status when engine has not confirmed', async () => {
       const payload = { amount: 100000 };
       const { request } = delegation.interceptConsequentialAction(
         'FIN-FXA',
@@ -562,12 +562,49 @@ describe('Owner Cryptographic Authentication & Governance Verification', () => {
       request.status = 'APPROVED';
 
       // revalidateConsequentialAction MUST detect that policy engine has not confirmed approval
-      expect(() =>
+      await expect(
         delegation.revalidateConsequentialAction(request.id, payload)
-      ).toThrow(ConsequentialPolicyViolationError);
-      expect(() =>
+      ).rejects.toThrow(ConsequentialPolicyViolationError);
+      await expect(
         delegation.revalidateConsequentialAction(request.id, payload)
-      ).toThrow(/policy engine has not confirmed approval/);
+      ).rejects.toThrow(/status is 'PENDING_OWNER_REVIEW'/);
+    });
+
+    it('rejects revalidation when an approved request is marked executed through the policy engine rather than accepting stale cached approval', async () => {
+      const payload = { amount: 80000, recipient: 'vendor-123' };
+      const { request } = delegation.interceptConsequentialAction(
+        'FIN-FXA',
+        randomUUID(),
+        'CAPITAL_TRANSFER',
+        payload
+      );
+
+      const ownerSession = authService.createOwnerSession({
+        principalId: OWNER_PRINCIPAL_ID,
+        email: CANONICAL_OWNER_PRINCIPAL.email,
+        credentials: validCredentials,
+      });
+
+      // Step 1: Approve request legitimately through DelegationManager
+      await delegation.authorizeAction(request.id, 'APPROVED', ownerSession, 'Initial approval');
+      expect(delegation.getRequestById(request.id)?.status).toBe('APPROVED');
+
+      // First revalidation succeeds
+      const firstRevalidation = await delegation.revalidateConsequentialAction(request.id, payload);
+      expect(firstRevalidation.status).toBe('APPROVED');
+
+      // Step 2: Mark request executed through the policy engine
+      await policyEngine.recordExecutionOutcome(request.id, 'SUCCESS', { txId: 'tx-executed-123' });
+      const currentPolicyRecord = await policyEngine.getRequestById(request.id);
+      expect(currentPolicyRecord?.status).toBe('EXECUTED');
+
+      // Step 3: Prove DelegationManager revalidation rejects it rather than accepting stale cached approval
+      await expect(
+        delegation.revalidateConsequentialAction(request.id, payload)
+      ).rejects.toThrow(ConsequentialPolicyViolationError);
+      await expect(
+        delegation.revalidateConsequentialAction(request.id, payload)
+      ).rejects.toThrow(/already been executed/);
     });
 
     it('successfully authorizes consequential action through DelegationManager with valid Owner session and passes revalidation', async () => {
@@ -597,7 +634,7 @@ describe('Owner Cryptographic Authentication & Governance Verification', () => {
       expect(delegation.getRequestById(request.id)?.status).toBe('APPROVED');
 
       // Revalidation succeeds with confirmed engine approval
-      const revalidated = delegation.revalidateConsequentialAction(request.id, payload);
+      const revalidated = await delegation.revalidateConsequentialAction(request.id, payload);
       expect(revalidated.status).toBe('APPROVED');
     });
 

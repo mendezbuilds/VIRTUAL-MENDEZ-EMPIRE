@@ -10,7 +10,6 @@ import type { MessageRouter } from './message-router.js';
 import {
   ConsequentialPolicyEngine,
   type ConsequentialActionType,
-  type ConsequentialAuthorizationRecord,
   computeParameterHash,
   ConsequentialPolicyViolationError,
   UnauthorizedOwnerDecisionError,
@@ -37,7 +36,6 @@ export { UnauthorizedOwnerDecisionError };
 
 export class DelegationManager {
   private pendingOwnerApprovals: OwnerAuthorizationRequest[] = [];
-  private confirmedPolicyApprovals = new Map<string, ConsequentialAuthorizationRecord>();
   public readonly policyEngine: ConsequentialPolicyEngine;
 
   constructor(
@@ -187,20 +185,19 @@ export class DelegationManager {
     request.decisionNotes = resolvedRecord.decisionNotes;
     request.decidedAt = resolvedRecord.decidedAt;
 
-    this.confirmedPolicyApprovals.set(requestId, resolvedRecord);
-
     return request;
   }
 
   /**
    * Step 6 of Consequential Action Lifecycle: Revalidates that an authorized request
    * has not expired, that the parameters to execute cryptographically match the authorized hash,
-   * and that the policy engine has confirmed approval (eliminating local status tampering bypass).
+   * and that the policy engine's current state confirms approval (rejecting expired, rejected,
+   * or already-executed requests, and eliminating stale cached approval or local tampering bypasses).
    */
-  revalidateConsequentialAction(
+  async revalidateConsequentialAction(
     requestId: string,
     payloadToExecute: Record<string, unknown>
-  ): OwnerAuthorizationRequest {
+  ): Promise<OwnerAuthorizationRequest> {
     const request = this.pendingOwnerApprovals.find((r) => r.id === requestId);
     if (!request) {
       throw new ConsequentialPolicyViolationError(
@@ -208,22 +205,13 @@ export class DelegationManager {
       );
     }
 
-    // 5. Ensure revalidateConsequentialAction() cannot authorize execution based solely on local status
-    // when the policy engine has not confirmed approval.
     if (!this.policyEngine) {
       throw new ConsequentialPolicyViolationError(
         `Cannot execute consequential action ${requestId}: ConsequentialPolicyEngine is not configured.`
       );
     }
 
-    const policyRecord =
-      this.confirmedPolicyApprovals.get(requestId) ?? this.policyEngine.getRequestRecord(requestId);
-    if (!policyRecord || policyRecord.status !== 'APPROVED') {
-      throw new ConsequentialPolicyViolationError(
-        `Cannot execute consequential action ${requestId}: policy engine has not confirmed approval (current engine status: '${policyRecord?.status ?? 'UNREGISTERED'}'). Local status alone cannot authorize execution.`
-      );
-    }
-
+    // 4. Keep the existing local status and parameter-hash checks as additional safeguards.
     if (request.status !== 'APPROVED') {
       throw new ConsequentialPolicyViolationError(
         `Cannot execute consequential action ${requestId}: status is '${request.status}'. Owner approval is required.`
@@ -237,14 +225,6 @@ export class DelegationManager {
       );
     }
 
-    if (policyRecord.validUntil && new Date(policyRecord.validUntil).getTime() < Date.now()) {
-      request.status = 'EXPIRED';
-      policyRecord.status = 'EXPIRED';
-      throw new ConsequentialPolicyViolationError(
-        `Cannot execute consequential action ${requestId}: policy engine authorization has expired.`
-      );
-    }
-
     const currentHash = computeParameterHash(payloadToExecute);
     if (request.parameterHash && currentHash !== request.parameterHash) {
       throw new ConsequentialPolicyViolationError(
@@ -252,11 +232,15 @@ export class DelegationManager {
       );
     }
 
-    if (policyRecord.parameterHash && currentHash !== policyRecord.parameterHash) {
-      throw new ConsequentialPolicyViolationError(
-        `Cryptographic parameter hash mismatch! Policy engine authorized hash '${policyRecord.parameterHash}' does not match execution payload hash '${currentHash}'. Parameter tampering detected.`
-      );
-    }
+    // 2 & 3. Do not use confirmedPolicyApprovals or cached records as the authority for current approval status.
+    // Revalidate against the policy engine's current record using revalidateForExecution(),
+    // so expired, rejected, or already-executed requests are rejected.
+    const policyRecord = await this.policyEngine.revalidateForExecution(
+      requestId,
+      payloadToExecute
+    );
+
+    request.status = policyRecord.status;
 
     return request;
   }
