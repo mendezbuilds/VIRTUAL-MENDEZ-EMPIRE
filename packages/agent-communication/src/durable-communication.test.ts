@@ -412,8 +412,13 @@ describe('Durable Agent Communication & Consequential Policy Lifecycle', () => {
         payload
       );
 
-      // Approve legitimately
-      delegation.authorizeAction(request.id, 'APPROVED', OWNER_PRINCIPAL_ID);
+      // Approve legitimately using cryptographically signed Owner session
+      const ownerSession = authService.createOwnerSession({
+        principalId: OWNER_PRINCIPAL_ID,
+        email: CANONICAL_OWNER_PRINCIPAL.email,
+        credentials: testOwnerCredentials,
+      });
+      delegation.authorizeAction(request.id, 'APPROVED', ownerSession);
 
       // Altered recipient should be detected
       const alteredPayload = {

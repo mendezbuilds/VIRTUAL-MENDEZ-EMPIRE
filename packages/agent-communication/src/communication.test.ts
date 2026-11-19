@@ -3,12 +3,14 @@ import { randomUUID } from 'node:crypto';
 import { DepartmentRegistry } from '@vme/department-hierarchy';
 import { EmergencySupervisor, EmergencyHaltError } from '@vme/security-governance';
 import { EpisodicMemory, InMemoryEpisodicStorage } from '@vme/agent-memory';
-import { OWNER_PRINCIPAL_ID, type OrchestratedTask } from '@vme/shared-types';
+import { OWNER_PRINCIPAL_ID, CANONICAL_OWNER_PRINCIPAL, type OrchestratedTask } from '@vme/shared-types';
 import {
   MessageRouter,
   DelegationManager,
   MessageRoutingError,
   UnauthorizedOwnerDecisionError,
+  OwnerAuthenticationService,
+  ConsequentialPolicyEngine,
 } from './index.js';
 
 describe('@vme/agent-communication Corporate Delegation & Messaging', () => {
@@ -17,6 +19,9 @@ describe('@vme/agent-communication Corporate Delegation & Messaging', () => {
   let episodicMemory: EpisodicMemory;
   let router: MessageRouter;
   let delegation: DelegationManager;
+  let authService: OwnerAuthenticationService;
+  const testSecret = 'vme-comm-test-secret-32b-length-secure';
+  const testCreds = 'vme-comm-test-owner-creds-master-key';
 
   beforeEach(() => {
     hierarchy = new DepartmentRegistry();
@@ -26,7 +31,12 @@ describe('@vme/agent-communication Corporate Delegation & Messaging', () => {
       emergencySupervisor: supervisor,
       episodicMemory,
     });
-    delegation = new DelegationManager(hierarchy, router);
+    authService = new OwnerAuthenticationService({
+      secretKey: testSecret,
+      requiredCredentials: testCreds,
+    });
+    const policyEngine = new ConsequentialPolicyEngine({ authService });
+    delegation = new DelegationManager(hierarchy, router, policyEngine);
   });
 
   it('delivers task delegation from Director to Specialist', async () => {
@@ -107,7 +117,7 @@ describe('@vme/agent-communication Corporate Delegation & Messaging', () => {
     expect(pendingList[0]?.actionType).toBe('EXTERNAL_OUTREACH');
   });
 
-  it('enforces that only the authentic Owner principal can approve consequential actions', () => {
+  it('enforces that only the authentic Owner principal with cryptographic session can approve consequential actions', () => {
     const outreachBot = hierarchy.getAgentRecord('OPP-OUTR')!;
     const ceo = hierarchy.getAgentRecord('EXEC-CEO')!;
     const taskId = randomUUID();
@@ -119,20 +129,40 @@ describe('@vme/agent-communication Corporate Delegation & Messaging', () => {
       { amountUsd: 50000, recipient: '0x1234' }
     );
 
-    // AI agent (even CEO) attempting to approve throws UnauthorizedOwnerDecisionError
+    // AI agent attempting to approve throws UnauthorizedOwnerDecisionError and leaves request unchanged
     expect(() => {
       delegation.authorizeAction(request.id, 'APPROVED', ceo.id, 'CEO self-approval');
     }).toThrow(UnauthorizedOwnerDecisionError);
+    expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
 
-    // Legitimate Owner approval succeeds
+    // Identity-only authentication (passing OWNER_PRINCIPAL_ID string) is strictly rejected and leaves request unchanged
+    expect(() => {
+      delegation.authorizeAction(request.id, 'APPROVED', OWNER_PRINCIPAL_ID, 'Identity string attempt');
+    }).toThrow(UnauthorizedOwnerDecisionError);
+    expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
+
+    // Arbitrary identity string is strictly rejected and leaves request unchanged
+    expect(() => {
+      delegation.authorizeAction(request.id, 'APPROVED', 'Stephen Mendez', 'Name string attempt');
+    }).toThrow(UnauthorizedOwnerDecisionError);
+    expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
+
+    // Legitimate Owner approval with cryptographic session succeeds
+    const ownerSession = authService.createOwnerSession({
+      principalId: OWNER_PRINCIPAL_ID,
+      email: CANONICAL_OWNER_PRINCIPAL.email,
+      credentials: testCreds,
+    });
+
     const approved = delegation.authorizeAction(
       request.id,
       'APPROVED',
-      OWNER_PRINCIPAL_ID,
+      ownerSession,
       'Approved after reviewing liquidity'
     );
     expect(approved.status).toBe('APPROVED');
     expect(approved.decidedBy).toBe(OWNER_PRINCIPAL_ID);
+    expect(delegation.getRequestById(request.id)?.status).toBe('APPROVED');
   });
 
   it('enforces cross-department communication boundaries between non-director specialists', async () => {

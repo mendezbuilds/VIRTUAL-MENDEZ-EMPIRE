@@ -4,6 +4,10 @@ import {
   OWNER_PRINCIPAL_ID,
   CANONICAL_OWNER_PRINCIPAL,
 } from '@vme/shared-types';
+import { DepartmentRegistry } from '@vme/department-hierarchy';
+import { EmergencySupervisor } from '@vme/security-governance';
+import { MessageRouter } from './message-router.js';
+import { DelegationManager } from './delegation-manager.js';
 import {
   OwnerAuthenticationService,
   ConsequentialPolicyEngine,
@@ -158,6 +162,28 @@ describe('Owner Cryptographic Authentication & Governance Verification', () => {
       );
       expect(() => authService.verifyOwnerSession(session)).toThrow(
         /has been revoked/
+      );
+    });
+
+    it('rejects unregistered sessions that were not issued by the active service registry', () => {
+      // Craft a signed token with valid format and signature, but a non-registered random sessionId
+      const unregisteredClaims: OwnerSessionClaims = {
+        principalId: OWNER_PRINCIPAL_ID,
+        email: CANONICAL_OWNER_PRINCIPAL.email,
+        sessionId: randomUUID(), // not in authService.activeSessions
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + 3600000,
+        nonce: randomUUID(),
+      };
+      const payloadB64 = Buffer.from(JSON.stringify(unregisteredClaims)).toString('base64url');
+      const sig = createHmac('sha256', validSecretKey).update(payloadB64).digest('hex');
+      const unregisteredToken = `${payloadB64}.${sig}`;
+
+      expect(() => authService.verifyOwnerSession(unregisteredToken)).toThrow(
+        UnauthorizedOwnerDecisionError
+      );
+      expect(() => authService.verifyOwnerSession(unregisteredToken)).toThrow(
+        /not registered or has been terminated/
       );
     });
   });
@@ -360,6 +386,145 @@ describe('Owner Cryptographic Authentication & Governance Verification', () => {
 
       expect(resolved.status).toBe('APPROVED');
       expect(resolved.decidedBy).toBe(OWNER_PRINCIPAL_ID);
+    });
+  });
+
+  describe('7. DelegationManager Owner Authorization Bypass Defenses', () => {
+    let delegation: DelegationManager;
+
+    beforeEach(() => {
+      const hierarchy = new DepartmentRegistry();
+      const supervisor = new EmergencySupervisor(undefined, false);
+      const router = new MessageRouter(hierarchy, { emergencySupervisor: supervisor });
+      delegation = new DelegationManager(hierarchy, router, policyEngine);
+    });
+
+    it('rejects OWNER_PRINCIPAL_ID string through DelegationManager and leaves request unchanged', () => {
+      const { request } = delegation.interceptConsequentialAction(
+        'FIN-FXA',
+        randomUUID(),
+        'CAPITAL_TRANSFER',
+        { amount: 50000 }
+      );
+
+      expect(() =>
+        delegation.authorizeAction(request.id, 'APPROVED', OWNER_PRINCIPAL_ID)
+      ).toThrow(UnauthorizedOwnerDecisionError);
+
+      expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
+    });
+
+    it('rejects arbitrary identity strings through DelegationManager and leaves request unchanged', () => {
+      const { request } = delegation.interceptConsequentialAction(
+        'FIN-FXA',
+        randomUUID(),
+        'LIVE_TRADING',
+        { symbol: 'AAPL', qty: 100 }
+      );
+
+      expect(() =>
+        delegation.authorizeAction(request.id, 'APPROVED', 'EXEC-CEO')
+      ).toThrow(UnauthorizedOwnerDecisionError);
+      expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
+
+      expect(() =>
+        delegation.authorizeAction(request.id, 'APPROVED', 'stephen@virtualmendezempire.internal')
+      ).toThrow(UnauthorizedOwnerDecisionError);
+      expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
+    });
+
+    it('rejects forged, expired, and revoked tokens through DelegationManager and leaves request unchanged', () => {
+      const { request } = delegation.interceptConsequentialAction(
+        'OPS-DIR',
+        randomUUID(),
+        'BINDING_CONTRACT',
+        { vendor: 'AWS', commitment: 100000 }
+      );
+
+      // Forged token
+      const session = authService.createOwnerSession({
+        principalId: OWNER_PRINCIPAL_ID,
+        email: CANONICAL_OWNER_PRINCIPAL.email,
+        credentials: validCredentials,
+      });
+      const [payloadB64] = session.token.split('.');
+      const forgedToken = `${payloadB64}.0000000000000000000000000000000000000000000000000000000000000000`;
+
+      expect(() =>
+        delegation.authorizeAction(request.id, 'APPROVED', forgedToken)
+      ).toThrow(UnauthorizedOwnerDecisionError);
+      expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
+
+      // Expired token
+      const expiredSession = authService.createOwnerSession({
+        principalId: OWNER_PRINCIPAL_ID,
+        email: CANONICAL_OWNER_PRINCIPAL.email,
+        credentials: validCredentials,
+        sessionDurationMs: -1000,
+      });
+      expect(() =>
+        delegation.authorizeAction(request.id, 'APPROVED', expiredSession)
+      ).toThrow(UnauthorizedOwnerDecisionError);
+      expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
+
+      // Revoked token
+      authService.revokeSession(session.sessionId);
+      expect(() =>
+        delegation.authorizeAction(request.id, 'APPROVED', session)
+      ).toThrow(UnauthorizedOwnerDecisionError);
+      expect(delegation.getRequestById(request.id)?.status).toBe('PENDING_OWNER_REVIEW');
+    });
+
+    it('successfully authorizes consequential action through DelegationManager with valid Owner session', () => {
+      const { request } = delegation.interceptConsequentialAction(
+        'FIN-FXA',
+        randomUUID(),
+        'CAPITAL_TRANSFER',
+        { amount: 25000 }
+      );
+
+      const ownerSession = authService.createOwnerSession({
+        principalId: OWNER_PRINCIPAL_ID,
+        email: CANONICAL_OWNER_PRINCIPAL.email,
+        credentials: validCredentials,
+      });
+
+      const approved = delegation.authorizeAction(
+        request.id,
+        'APPROVED',
+        ownerSession,
+        'Owner approved transfer'
+      );
+
+      expect(approved.status).toBe('APPROVED');
+      expect(approved.decidedBy).toBe(OWNER_PRINCIPAL_ID);
+      expect(delegation.getRequestById(request.id)?.status).toBe('APPROVED');
+    });
+
+    it('successfully authorizes consequential action through DelegationManager with raw signed token string', () => {
+      const { request } = delegation.interceptConsequentialAction(
+        'FIN-FXA',
+        randomUUID(),
+        'CAPITAL_TRANSFER',
+        { amount: 15000 }
+      );
+
+      const ownerSession = authService.createOwnerSession({
+        principalId: OWNER_PRINCIPAL_ID,
+        email: CANONICAL_OWNER_PRINCIPAL.email,
+        credentials: validCredentials,
+      });
+
+      const approved = delegation.authorizeAction(
+        request.id,
+        'APPROVED',
+        ownerSession.token,
+        'Owner approved with raw token'
+      );
+
+      expect(approved.status).toBe('APPROVED');
+      expect(approved.decidedBy).toBe(OWNER_PRINCIPAL_ID);
+      expect(delegation.getRequestById(request.id)?.status).toBe('APPROVED');
     });
   });
 });

@@ -110,6 +110,22 @@ export interface OwnerAuthenticationServiceOptions {
   requiredCredentials?: string;
 }
 
+/**
+ * PROCESS RESTART PERSISTENCE NOTICE:
+ * In the current implementation of OwnerAuthenticationService, active sessions
+ * (`this.activeSessions: Map<string, OwnerSessionClaims>`) and revoked session IDs
+ * (`this.revokedSessionIds: Set<string>`) are maintained in process-local memory.
+ * 
+ * Durability Characteristics:
+ * - Session revocation and active session tracking DO NOT survive process restarts.
+ * - When the Node.js process terminates or restarts, all in-memory active sessions are lost.
+ *   Because unregistered sessions are strictly rejected, previously issued tokens will fail
+ *   verification after a restart (fail-closed behavior).
+ * - Similarly, in-memory revocation lists are reset on restart.
+ * - For multi-process or high-availability deployments requiring persistent revocation across
+ *   restarts, a persistent backing store (e.g. PostgreSQL `owner_revoked_sessions` table or Redis)
+ *   must be integrated.
+ */
 export class OwnerAuthenticationService {
   private activeSessions = new Map<string, OwnerSessionClaims>();
   private revokedSessionIds = new Set<string>();
@@ -282,8 +298,16 @@ export class OwnerAuthenticationService {
       throw new UnauthorizedOwnerDecisionError('Corrupted Owner authorization token claims structure.');
     }
 
+    // Ensure explicitly revoked sessions cannot be accepted
     if (this.revokedSessionIds.has(claims.sessionId)) {
       throw new UnauthorizedOwnerDecisionError(`Owner session '${claims.sessionId}' has been revoked.`);
+    }
+
+    // Ensure unregistered or terminated sessions cannot be accepted
+    if (!this.activeSessions.has(claims.sessionId)) {
+      throw new UnauthorizedOwnerDecisionError(
+        `Owner session '${claims.sessionId}' is not registered or has been terminated.`
+      );
     }
 
     if (Date.now() > claims.expiresAt) {
@@ -395,6 +419,7 @@ export class ConsequentialPolicyEngine {
    * quarantine, compute SHA-256 parameter hash, and generate bound authorization request.
    */
   async quarantineAction(params: {
+    id?: string;
     taskId: string;
     actionType: ConsequentialActionType;
     agentId: string;
@@ -412,7 +437,7 @@ export class ConsequentialPolicyEngine {
     const parameterHash = computeParameterHash(params.payload);
     const requestedAt = new Date().toISOString();
     const validUntil = new Date(Date.now() + policy.maxValidityWindowMs).toISOString();
-    const id = `auth-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    const id = params.id ?? `auth-${Date.now()}-${randomUUID().slice(0, 8)}`;
 
     const record: ConsequentialAuthorizationRecord = {
       id,

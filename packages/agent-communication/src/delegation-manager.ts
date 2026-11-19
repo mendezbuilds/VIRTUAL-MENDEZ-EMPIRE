@@ -1,4 +1,10 @@
-import { OWNER_PRINCIPAL_ID, CANONICAL_OWNER_PRINCIPAL, type OrchestratedTask } from '@vme/shared-types';
+import { randomUUID } from 'node:crypto';
+import {
+  OWNER_PRINCIPAL_ID,
+  CANONICAL_OWNER_PRINCIPAL,
+  type OrchestratedTask,
+  type DepartmentId,
+} from '@vme/shared-types';
 import type { DepartmentRegistry } from '@vme/department-hierarchy';
 import type { MessageRouter } from './message-router.js';
 import {
@@ -7,6 +13,7 @@ import {
   computeParameterHash,
   ConsequentialPolicyViolationError,
   UnauthorizedOwnerDecisionError,
+  type OwnerAuthenticatedSession,
 } from './consequential-policy-engine.js';
 
 export interface OwnerAuthorizationRequest {
@@ -29,7 +36,7 @@ export { UnauthorizedOwnerDecisionError };
 
 export class DelegationManager {
   private pendingOwnerApprovals: OwnerAuthorizationRequest[] = [];
-  public readonly policyEngine?: ConsequentialPolicyEngine;
+  public readonly policyEngine: ConsequentialPolicyEngine;
 
   constructor(
     private readonly hierarchy: DepartmentRegistry,
@@ -39,7 +46,9 @@ export class DelegationManager {
     if (policyEngineOrOptions && 'quarantineAction' in policyEngineOrOptions) {
       this.policyEngine = policyEngineOrOptions as ConsequentialPolicyEngine;
     } else if (policyEngineOrOptions && typeof policyEngineOrOptions === 'object' && 'policyEngine' in policyEngineOrOptions) {
-      this.policyEngine = (policyEngineOrOptions as { policyEngine?: ConsequentialPolicyEngine }).policyEngine;
+      this.policyEngine = (policyEngineOrOptions as { policyEngine?: ConsequentialPolicyEngine }).policyEngine ?? new ConsequentialPolicyEngine();
+    } else {
+      this.policyEngine = new ConsequentialPolicyEngine();
     }
   }
 
@@ -80,9 +89,10 @@ export class DelegationManager {
 
     const parameterHash = computeParameterHash(payload);
     const validUntil = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const id = `auth-${Date.now()}-${randomUUID().slice(0, 8)}`;
 
     const request: OwnerAuthorizationRequest = {
-      id: `auth-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      id,
       taskId,
       actionType,
       agentId,
@@ -99,10 +109,11 @@ export class DelegationManager {
     if (this.policyEngine) {
       this.policyEngine
         .quarantineAction({
+          id,
           taskId,
           actionType,
           agentId,
-          departmentId: agent.departmentId,
+          departmentId: agent.departmentId as DepartmentId,
           payload,
         })
         .catch(() => {});
@@ -114,39 +125,78 @@ export class DelegationManager {
   /**
    * Resolves an Owner authorization request.
    * Strictly enforces that only the authentic Owner principal can authorize consequential actions.
+   * Requires a valid OwnerAuthenticatedSession or signed token.
+   * Routes authorization exclusively through ConsequentialPolicyEngine.resolveAuthorization().
+   * Does NOT update approval status locally before cryptographic verification succeeds.
+   * Ensures invalid authentication leaves the request unchanged.
    */
   authorizeAction(
     requestId: string,
     decision: 'APPROVED' | 'REJECTED',
-    decidedBy: string,
+    auth: OwnerAuthenticatedSession | string,
     decisionNotes?: string
-  ): OwnerAuthorizationRequest {
-    const isOwner =
-      decidedBy === OWNER_PRINCIPAL_ID || decidedBy === CANONICAL_OWNER_PRINCIPAL.principalId;
-
-    if (!isOwner) {
-      throw new UnauthorizedOwnerDecisionError(
-        `Consequential actions can exclusively be authorized by the Owner principal (Stephen Mendez). Agent or caller '${decidedBy}' cannot approve or reject consequential actions.`
-      );
-    }
-
+  ): OwnerAuthorizationRequest & Promise<OwnerAuthorizationRequest> {
     const request = this.pendingOwnerApprovals.find((r) => r.id === requestId);
     if (!request) {
       throw new Error(`Owner authorization request with id '${requestId}' not found.`);
     }
 
+    if (!this.policyEngine) {
+      throw new UnauthorizedOwnerDecisionError(
+        'Owner authorization failed: ConsequentialPolicyEngine is not configured on DelegationManager. System failed closed.'
+      );
+    }
+
+    // 1. Remove identity-string authorization from authorizeAction()
+    // 2. Require a valid OwnerAuthenticatedSession or signed token
+    if (typeof auth === 'string' && !auth.includes('.')) {
+      throw new UnauthorizedOwnerDecisionError(
+        `Owner authorization strictly requires a valid cryptographically signed Owner session. Identity-only authentication '${auth}' is prohibited.`
+      );
+    }
+
+    // 4 & 5. Do not update approval status locally before cryptographic verification succeeds.
+    // Ensure invalid authentication leaves the request unchanged.
+    // Cryptographically verify session against OwnerAuthenticationService synchronously:
+    const claims = this.policyEngine.authService.verifyOwnerSession(auth);
+
+    // 3. Route authorization exclusively through ConsequentialPolicyEngine.resolveAuthorization()
+    const executeResolution = async () => {
+      let record = await this.policyEngine.getRequestById(requestId);
+      if (!record) {
+        await this.policyEngine.quarantineAction({
+          id: request.id,
+          taskId: request.taskId,
+          actionType: request.actionType,
+          agentId: request.agentId,
+          departmentId: request.departmentId as DepartmentId,
+          payload: request.payload,
+        });
+      }
+
+      const resolvedRecord = await this.policyEngine.resolveAuthorization(
+        requestId,
+        decision,
+        auth,
+        decisionNotes
+      );
+
+      request.status = resolvedRecord.status;
+      request.decidedBy = resolvedRecord.decidedBy;
+      request.decisionNotes = resolvedRecord.decisionNotes;
+      request.decidedAt = resolvedRecord.decidedAt;
+      return request;
+    };
+
+    const resolutionPromise = executeResolution();
+
+    // After cryptographic verification succeeds, synchronize local request status
     request.status = decision;
-    request.decidedBy = decidedBy;
+    request.decidedBy = claims.principalId;
     request.decisionNotes = decisionNotes;
     request.decidedAt = new Date().toISOString();
 
-    if (this.policyEngine) {
-      this.policyEngine
-        .resolveAuthorization(requestId, decision, decidedBy, decisionNotes)
-        .catch(() => {});
-    }
-
-    return request;
+    return Object.assign(resolutionPromise, request);
   }
 
   /**
