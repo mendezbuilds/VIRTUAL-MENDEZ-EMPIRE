@@ -15,7 +15,7 @@ export class ExecutionSandboxError extends Error {
 }
 
 export interface FileSystemToolInput {
-  action: 'read' | 'write' | 'list' | 'stat' | 'exists';
+  action: 'read' | 'write' | 'list' | 'stat' | 'exists' | 'delete';
   relativePath: string;
   content?: string;
 }
@@ -141,6 +141,15 @@ export class RealFileSystemAdapter {
             verified: true,
           };
         }
+      }
+      case 'delete': {
+        await fs.rm(targetPath, { recursive: true, force: true });
+        return {
+          action: 'delete',
+          relativePath: input.relativePath,
+          absolutePath: targetPath,
+          verified: true,
+        };
       }
       default:
         throw new Error(`Unsupported filesystem action: ${(input as any).action}`);

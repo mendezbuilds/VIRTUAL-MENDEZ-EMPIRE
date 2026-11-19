@@ -593,6 +593,44 @@ export class ConsequentialPolicyEngine {
   }
 
   /**
+   * Atomically claims an approved authorization request for execution, preventing concurrent replay.
+   */
+  async claimApprovalForExecution(
+    requestId: string,
+    payloadToExecute: Record<string, unknown>
+  ): Promise<ConsequentialAuthorizationRecord> {
+    const record = await this.revalidateForExecution(requestId, payloadToExecute);
+
+    record.status = 'EXECUTED';
+    record.executedAt = new Date().toISOString();
+    record.executionStatus = 'PENDING_COMPLETION';
+
+    if (this.pool) {
+      const client = await this.pool.connect();
+      try {
+        const res = await client.query(
+          `UPDATE consequential_authorization_requests
+           SET status = 'EXECUTED', executed_at = $1, execution_status = 'PENDING_COMPLETION'
+           WHERE id = $2 AND tenant_id = $3 AND status = 'APPROVED'
+           RETURNING id`,
+          [record.executedAt, requestId, this.tenantId]
+        );
+        if (res.rows.length === 0) {
+          throw new ConsequentialPolicyViolationError(
+            `Concurrent execution detected: Approval ${requestId} has already been claimed or executed.`
+          );
+        }
+      } finally {
+        client.release();
+      }
+    } else {
+      this.inMemoryRecords.set(requestId, record);
+    }
+
+    return record;
+  }
+
+  /**
    * Step 7 & 8: Record Execution Outcome and Evidence.
    */
   async recordExecutionOutcome(

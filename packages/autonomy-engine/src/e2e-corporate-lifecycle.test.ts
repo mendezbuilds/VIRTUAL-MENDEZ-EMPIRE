@@ -23,7 +23,7 @@ import {
   PerformanceReviewEngine,
   DepartmentAnalyticsEngine,
 } from '@vme/performance-management';
-import { OWNER_PRINCIPAL_ID } from '@vme/shared-types';
+import { OWNER_PRINCIPAL_ID, CANONICAL_OWNER_PRINCIPAL } from '@vme/shared-types';
 import {
   AutonomyCoordinator,
   ExecutiveReporter,
@@ -33,6 +33,8 @@ import {
 
 describe('VIRTUAL MENDEZ EMPIRE — End-to-End Corporate Lifecycle (Phase 2)', () => {
   it('executes full autonomous corporate workflow: strategy -> delegation -> execution -> memory -> KPIs -> executive reporting', async () => {
+    process.env.OWNER_AUTH_SECRET = 'vme-canonical-owner-hmac-secret-test-32b-length';
+    process.env.OWNER_AUTH_CREDENTIALS = 'vme-owner-secure-cryptographic-master-key-2026';
     const tenantId = randomUUID();
 
     // 1. Initialize complete corporate infrastructure
@@ -131,22 +133,27 @@ describe('VIRTUAL MENDEZ EMPIRE — End-to-End Corporate Lifecycle (Phase 2)', (
 
     // AI agent cannot self-authorize consequential action
     const ceo = hierarchy.getAgentRecord('EXEC-CEO')!;
-    expect(() => {
-      delegation.authorizeAction(pendingApprovals[0]!.id, 'APPROVED', ceo.id);
-    }).toThrow(UnauthorizedOwnerDecisionError);
+    await expect(
+      delegation.authorizeAction(pendingApprovals[0]!.id, 'APPROVED', ceo.id)
+    ).rejects.toThrow(UnauthorizedOwnerDecisionError);
 
-    // Authentic Owner authorizes the action
-    const approvedRequest = delegation.authorizeAction(
+    // Authentic Owner authorizes the action with cryptographically signed session
+    const ownerSession = delegation.policyEngine.authService.createOwnerSession({
+      principalId: OWNER_PRINCIPAL_ID,
+      email: CANONICAL_OWNER_PRINCIPAL.email,
+      credentials: 'vme-owner-secure-cryptographic-master-key-2026',
+    });
+    const approvedRequest = await delegation.authorizeAction(
       pendingApprovals[0]!.id,
       'APPROVED',
-      OWNER_PRINCIPAL_ID,
+      ownerSession,
       'Approved after reviewing dossier preview'
     );
     expect(approvedRequest.status).toBe('APPROVED');
     expect(approvedRequest.decidedBy).toBe(OWNER_PRINCIPAL_ID);
 
     // Pre-execution revalidation verifies parameter integrity
-    const revalidated = delegation.revalidateConsequentialAction(
+    const revalidated = await delegation.revalidateConsequentialAction(
       approvedRequest.id,
       quarantined.inputData
     );

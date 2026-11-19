@@ -7,6 +7,8 @@ import {
   ConsequentialPolicyEngine,
   type ConsequentialActionType,
   type ConsequentialAuthorizationRecord,
+  computeParameterHash,
+  ConsequentialPolicyViolationError,
 } from '@vme/agent-communication';
 import type { PerformanceEventStore } from '@vme/performance-management';
 import {
@@ -80,6 +82,7 @@ export class QuarantinedActionError extends Error {
 export class ToolExecutionRuntime {
   private tools = new Map<string, ToolDefinition<any, any>>();
   private executionLogs: ToolExecutionLog[] = [];
+  private activeApprovalLocks = new Set<string>();
 
   private readonly emergencySupervisor?: EmergencySupervisor;
   public readonly policyEngine?: ConsequentialPolicyEngine;
@@ -173,6 +176,26 @@ export class ToolExecutionRuntime {
     return null;
   }
 
+  resolveOperation(
+    toolName: string,
+    tool?: ToolDefinition<any, any>,
+    args?: Record<string, unknown>
+  ): string {
+    if (args && typeof args.operation === 'string' && args.operation.trim().length > 0) {
+      return args.operation.trim();
+    }
+    if (args && typeof args.action === 'string' && args.action.trim().length > 0) {
+      return args.action.trim();
+    }
+    if (args && typeof args.method === 'string' && args.method.trim().length > 0) {
+      return args.method.trim().toUpperCase();
+    }
+    if (args && typeof args.command === 'string' && args.command.trim().length > 0) {
+      return args.command.trim();
+    }
+    return toolName;
+  }
+
   async executeTool(
     toolName: string,
     args: Record<string, unknown>,
@@ -181,193 +204,297 @@ export class ToolExecutionRuntime {
   ): Promise<unknown> {
     const startTime = Date.now();
     const executionId = randomUUID();
+    const approvalRequestId = options?.approvalRequestId;
 
-    // 1. Emergency Halt Check
-    if (this.emergencySupervisor) {
-      this.emergencySupervisor.assertOperational();
-    }
-
-    // 2. Secret Redaction & Credential Defense
-    const credCheck = assertNoRawCredentials(args, `tool_args_${toolName}`);
-    if (!credCheck.valid) {
-      throw new ToolExecutionError(
-        `Credential defense violation in tool '${toolName}': ${credCheck.errors.join('; ')}`
-      );
-    }
-
-    // 3. Tool Lookup
-    const tool = this.tools.get(toolName);
-    if (!tool) {
-      throw new ToolExecutionError(`Tool '${toolName}' is not registered in the runtime.`);
-    }
-
-    // 4. Agent and Capability Verification
-    const agent = this.hierarchy.getAgentRecord(context.agentId);
-    if (!agent) {
-      throw new ToolExecutionError(`Agent '${context.agentId}' not found in corporate hierarchy.`);
+    if (approvalRequestId) {
+      if (this.activeApprovalLocks.has(approvalRequestId)) {
+        throw new ToolExecutionError(
+          `Consequential action approval '${approvalRequestId}' is already locked for execution. Concurrent replay attempt rejected.`
+        );
+      }
+      this.activeApprovalLocks.add(approvalRequestId);
     }
 
     try {
-      this.hierarchy.assertCapability(agent.id, tool.requiredCapability);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new ToolExecutionError(
-        `Agent '${agent.agentCode}' is unauthorized to execute tool '${toolName}': ${msg}`
-      );
-    }
-
-    // 5. Centralized Consequential Action Policy Enforcement Point
-    const classifiedActionType = this.classifyAction(toolName, tool, args);
-    let approvalRequestId = options?.approvalRequestId;
-
-    if ((classifiedActionType || approvalRequestId) && this.policyEngine) {
-      if (!approvalRequestId) {
-        // Quarantine the action immediately and persist approval request
-        const quarantineRecord = await this.policyEngine.quarantineAction({
-          taskId: context.taskId,
-          actionType: classifiedActionType!,
-          agentId: context.agentId,
-          departmentId: context.departmentId,
-          payload: args,
-        });
-
-        throw new QuarantinedActionError(
-          `Consequential action '${classifiedActionType}' invoked via tool '${toolName}' requires authentic Owner authorization. Action has been quarantined under request ID '${quarantineRecord.id}'.`,
-          quarantineRecord
-        );
-      }
-
-      // Revalidate approval against exact parameters immediately prior to execution
-      await this.policyEngine.revalidateForExecution(approvalRequestId, args);
-
-      // Re-verify emergency halt immediately before execution
+      // 1. Emergency Halt Check
       if (this.emergencySupervisor) {
         this.emergencySupervisor.assertOperational();
       }
-    }
 
-    // 6. Start Execution Recording
-    const taskRecord = await this.executionRecorder.startExecution({
-      taskId: context.taskId,
-      agentId: context.agentId,
-      toolInvoked: toolName,
-      authorizedCapability: tool.requiredCapability,
-    });
-
-    // 7. Execute Tool with Timing
-    try {
-      const result = await tool.execute(args, context);
-      const durationMs = Date.now() - startTime;
-
-      this.executionLogs.push({
-        executionId,
-        toolName,
-        agentId: context.agentId,
-        agentCode: context.agentCode,
-        departmentId: context.departmentId,
-        taskId: context.taskId,
-        isSuccessful: true,
-        durationMs,
-        executedAt: new Date().toISOString(),
-      });
-
-      const artifacts: string[] = [];
-      if (
-        typeof result === 'object' &&
-        result !== null &&
-        'absolutePath' in result &&
-        typeof (result as any).absolutePath === 'string'
-      ) {
-        artifacts.push((result as any).absolutePath);
-      }
-
-      await this.executionRecorder.completeExecution({
-        recordId: taskRecord.id,
-        status: 'COMPLETED',
-        durationMs,
-        outputData:
-          typeof result === 'object' && result !== null
-            ? (result as Record<string, unknown>)
-            : { result },
-        artifactReferences: artifacts,
-        verificationResult: 'VERIFIED_SUCCESS',
-      });
-
-      // Mark approval consumed / executed in policy engine to prevent replay attacks
-      if (approvalRequestId && this.policyEngine) {
-        await this.policyEngine.recordExecutionOutcome(
-          approvalRequestId,
-          'SUCCESS',
-          typeof result === 'object' && result !== null
-            ? (result as Record<string, unknown>)
-            : { result }
+      // 2. Secret Redaction & Credential Defense
+      const credCheck = assertNoRawCredentials(args, `tool_args_${toolName}`);
+      if (!credCheck.valid) {
+        throw new ToolExecutionError(
+          `Credential defense violation in tool '${toolName}': ${credCheck.errors.join('; ')}`
         );
       }
 
-      // Automatically emit persistent performance event
-      if (this.eventStore) {
-        await this.eventStore.recordEvent({
-          agentId: context.agentId,
-          departmentId: context.departmentId,
-          taskId: context.taskId,
-          eventType: toolName,
-          durationMs,
-          tokensUsed: 180,
-          costUsd: 0.002,
-          taskComplexity: classifiedActionType ? 2.5 : 1.2,
-          qualityScore: 1.0,
-          isSuccessful: true,
-        });
+      // 3. Tool Lookup
+      const tool = this.tools.get(toolName);
+      if (!tool) {
+        throw new ToolExecutionError(`Tool '${toolName}' is not registered in the runtime.`);
       }
 
-      return result;
-    } catch (err: unknown) {
-      const durationMs = Date.now() - startTime;
-      const errorMsg = err instanceof Error ? err.message : String(err);
+      // 4. Agent and Capability Verification
+      const agent = this.hierarchy.getAgentRecord(context.agentId);
+      if (!agent) {
+        throw new ToolExecutionError(`Agent '${context.agentId}' not found in corporate hierarchy.`);
+      }
 
-      this.executionLogs.push({
-        executionId,
-        toolName,
-        agentId: context.agentId,
-        agentCode: context.agentCode,
-        departmentId: context.departmentId,
+      try {
+        this.hierarchy.assertCapability(agent.id, tool.requiredCapability);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new ToolExecutionError(
+          `Agent '${agent.agentCode}' is unauthorized to execute tool '${toolName}': ${msg}`
+        );
+      }
+
+      // 5. Centralized Consequential Action Policy Enforcement Point
+      const classifiedActionType = this.classifyAction(toolName, tool, args);
+
+      if ((classifiedActionType || approvalRequestId) && this.policyEngine) {
+        if (!approvalRequestId) {
+          // Quarantine the action immediately and cryptographically bind tool identifier, operation, and parameters
+          const operation = this.resolveOperation(toolName, tool, args);
+          const quarantineRecord = await this.policyEngine.quarantineAction({
+            taskId: context.taskId,
+            actionType: classifiedActionType!,
+            agentId: context.agentId,
+            departmentId: context.departmentId,
+            payload: {
+              tool: toolName,
+              operation,
+              parameters: args,
+            },
+          });
+
+          throw new QuarantinedActionError(
+            `Consequential action '${classifiedActionType}' invoked via tool '${toolName}' requires authentic Owner authorization. Action has been quarantined under request ID '${quarantineRecord.id}'.`,
+            quarantineRecord
+          );
+        }
+
+        // Revalidate and atomically consume approval against exact parameters, tool, and operation
+        const currentOperation = this.resolveOperation(toolName, tool, args);
+        const record = await this.policyEngine.getRequestById(approvalRequestId);
+        if (!record) {
+          throw new ToolExecutionError(
+            `Consequential action approval request '${approvalRequestId}' was not found.`
+          );
+        }
+
+        if (record.status === 'EXECUTED') {
+          throw new ToolExecutionError(
+            `Replay attack prevented: Consequential action approval '${approvalRequestId}' has already been executed.`
+          );
+        }
+
+        if (record.status !== 'APPROVED') {
+          throw new ToolExecutionError(
+            `Cannot execute consequential tool '${toolName}': approval '${approvalRequestId}' status is '${record.status}'. Authentic Owner approval is required.`
+          );
+        }
+
+        if (record.validUntil && new Date(record.validUntil).getTime() < Date.now()) {
+          throw new ToolExecutionError(
+            `Cannot execute consequential tool '${toolName}': approval '${approvalRequestId}' has expired.`
+          );
+        }
+
+        // Check tool binding
+        const boundTool =
+          typeof record.payload?.tool === 'string'
+            ? record.payload.tool
+            : typeof record.payload?.toolName === 'string'
+              ? record.payload.toolName
+              : undefined;
+
+        if (boundTool && boundTool !== toolName) {
+          throw new ToolExecutionError(
+            `Approval '${approvalRequestId}' is cryptographically bound to tool '${boundTool}', but attempted execution with tool '${toolName}'. Tool substitution rejected.`
+          );
+        }
+
+        // Check operation binding
+        const boundOperation =
+          typeof record.payload?.operation === 'string'
+            ? record.payload.operation
+            : typeof record.payload?.action === 'string'
+              ? record.payload.action
+              : undefined;
+
+        if (boundOperation && boundOperation !== currentOperation) {
+          throw new ToolExecutionError(
+            `Approval '${approvalRequestId}' is cryptographically bound to operation '${boundOperation}', but attempted execution with operation '${currentOperation}'. Operation substitution rejected.`
+          );
+        }
+
+        // Check action type consistency
+        if (classifiedActionType && record.actionType && record.actionType !== classifiedActionType) {
+          throw new ToolExecutionError(
+            `Approval '${approvalRequestId}' action type '${record.actionType}' does not match requested tool action type '${classifiedActionType}'. Cross-action substitution rejected.`
+          );
+        }
+
+        // Determine canonical payload to verify against cryptographic parameterHash
+        let payloadToRevalidate: Record<string, unknown>;
+        if (
+          record.payload &&
+          'parameters' in record.payload &&
+          typeof record.payload.parameters === 'object' &&
+          record.payload.parameters !== null
+        ) {
+          payloadToRevalidate = {
+            tool: toolName,
+            operation: currentOperation,
+            parameters: args,
+          };
+        } else {
+          payloadToRevalidate = args;
+        }
+
+        // Atomically claim / consume the approval before tool execution starts
+        if (typeof (this.policyEngine as any).claimApprovalForExecution === 'function') {
+          await (this.policyEngine as any).claimApprovalForExecution(approvalRequestId, payloadToRevalidate);
+        } else {
+          await this.policyEngine.revalidateForExecution(approvalRequestId, payloadToRevalidate);
+          record.status = 'EXECUTED';
+        }
+
+        // Re-verify emergency halt immediately before execution
+        if (this.emergencySupervisor) {
+          this.emergencySupervisor.assertOperational();
+        }
+      }
+
+      // 6. Start Execution Recording
+      const taskRecord = await this.executionRecorder.startExecution({
         taskId: context.taskId,
-        isSuccessful: false,
-        durationMs,
-        errorMessage: errorMsg,
-        executedAt: new Date().toISOString(),
+        agentId: context.agentId,
+        toolInvoked: toolName,
+        authorizedCapability: tool.requiredCapability,
       });
 
-      await this.executionRecorder.completeExecution({
-        recordId: taskRecord.id,
-        status: 'FAILED',
-        durationMs,
-        errorMessage: errorMsg,
-        verificationResult: 'VERIFIED_FAILURE',
-      });
+      // 7. Execute Tool with Timing
+      try {
+        const result = await tool.execute(args, context);
+        const durationMs = Date.now() - startTime;
 
-      if (approvalRequestId && this.policyEngine) {
-        await this.policyEngine.recordExecutionOutcome(approvalRequestId, 'FAILED', {
-          error: errorMsg,
-        });
-      }
-
-      if (this.eventStore) {
-        await this.eventStore.recordEvent({
+        this.executionLogs.push({
+          executionId,
+          toolName,
           agentId: context.agentId,
+          agentCode: context.agentCode,
           departmentId: context.departmentId,
           taskId: context.taskId,
-          eventType: toolName,
+          isSuccessful: true,
           durationMs,
-          tokensUsed: 100,
-          costUsd: 0.001,
-          taskComplexity: classifiedActionType ? 2.5 : 1.2,
-          qualityScore: 0.0,
-          isSuccessful: false,
+          executedAt: new Date().toISOString(),
         });
-      }
 
-      throw new ToolExecutionError(`Tool execution failed for '${toolName}': ${errorMsg}`);
+        const artifacts: string[] = [];
+        if (
+          typeof result === 'object' &&
+          result !== null &&
+          'absolutePath' in result &&
+          typeof (result as any).absolutePath === 'string'
+        ) {
+          artifacts.push((result as any).absolutePath);
+        }
+
+        await this.executionRecorder.completeExecution({
+          recordId: taskRecord.id,
+          status: 'COMPLETED',
+          durationMs,
+          outputData:
+            typeof result === 'object' && result !== null
+              ? (result as Record<string, unknown>)
+              : { result },
+          artifactReferences: artifacts,
+          verificationResult: 'VERIFIED_SUCCESS',
+        });
+
+        // Mark approval execution outcome in policy engine
+        if (approvalRequestId && this.policyEngine) {
+          await this.policyEngine.recordExecutionOutcome(
+            approvalRequestId,
+            'SUCCESS',
+            typeof result === 'object' && result !== null
+              ? (result as Record<string, unknown>)
+              : { result }
+          );
+        }
+
+        // Automatically emit persistent performance event
+        if (this.eventStore) {
+          await this.eventStore.recordEvent({
+            agentId: context.agentId,
+            departmentId: context.departmentId,
+            taskId: context.taskId,
+            eventType: toolName,
+            durationMs,
+            tokensUsed: 180,
+            costUsd: 0.002,
+            taskComplexity: classifiedActionType ? 2.5 : 1.2,
+            qualityScore: 1.0,
+            isSuccessful: true,
+          });
+        }
+
+        return result;
+      } catch (err: unknown) {
+        const durationMs = Date.now() - startTime;
+        const errorMsg = err instanceof Error ? err.message : String(err);
+
+        this.executionLogs.push({
+          executionId,
+          toolName,
+          agentId: context.agentId,
+          agentCode: context.agentCode,
+          departmentId: context.departmentId,
+          taskId: context.taskId,
+          isSuccessful: false,
+          durationMs,
+          errorMessage: errorMsg,
+          executedAt: new Date().toISOString(),
+        });
+
+        await this.executionRecorder.completeExecution({
+          recordId: taskRecord.id,
+          status: 'FAILED',
+          durationMs,
+          errorMessage: errorMsg,
+          verificationResult: 'VERIFIED_FAILURE',
+        });
+
+        if (approvalRequestId && this.policyEngine) {
+          await this.policyEngine.recordExecutionOutcome(approvalRequestId, 'FAILED', {
+            error: errorMsg,
+          });
+        }
+
+        if (this.eventStore) {
+          await this.eventStore.recordEvent({
+            agentId: context.agentId,
+            departmentId: context.departmentId,
+            taskId: context.taskId,
+            eventType: toolName,
+            durationMs,
+            tokensUsed: 100,
+            costUsd: 0.001,
+            taskComplexity: classifiedActionType ? 2.5 : 1.2,
+            qualityScore: 0.0,
+            isSuccessful: false,
+          });
+        }
+
+        throw new ToolExecutionError(`Tool execution failed for '${toolName}': ${errorMsg}`);
+      }
+    } finally {
+      if (approvalRequestId) {
+        this.activeApprovalLocks.delete(approvalRequestId);
+      }
     }
   }
 

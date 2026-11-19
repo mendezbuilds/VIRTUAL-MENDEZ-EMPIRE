@@ -49,6 +49,8 @@ describe('VME Phase 2 — Production Integration & Complete Corporate Lifecycle'
   const tenantId = '00000000-0000-0000-0000-000000000001';
 
   beforeEach(() => {
+    process.env.OWNER_AUTH_SECRET = 'vme-canonical-owner-hmac-secret-test-32b-length';
+    process.env.OWNER_AUTH_CREDENTIALS = 'vme-owner-secure-cryptographic-master-key-2026';
     testSandboxDir = mkdtempSync(join(tmpdir(), 'vme-prod-test-'));
     const db = newDb();
 
@@ -409,6 +411,7 @@ describe('VME Phase 2 — Production Integration & Complete Corporate Lifecycle'
     const ownerSession = authService.createOwnerSession({
       principalId: OWNER_PRINCIPAL_ID,
       email: CANONICAL_OWNER_PRINCIPAL.email,
+      credentials: 'vme-owner-secure-cryptographic-master-key-2026',
     });
     expect(ownerSession.token).toBeDefined();
 
