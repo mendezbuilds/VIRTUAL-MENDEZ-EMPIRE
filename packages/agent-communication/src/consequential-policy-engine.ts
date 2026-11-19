@@ -105,29 +105,98 @@ export interface OwnerAuthenticatedSession {
   expiresAt: number;
 }
 
+export interface OwnerAuthenticationServiceOptions {
+  secretKey?: string;
+  requiredCredentials?: string;
+}
+
 export class OwnerAuthenticationService {
   private activeSessions = new Map<string, OwnerSessionClaims>();
   private revokedSessionIds = new Set<string>();
-  private readonly secretKey: string;
+  private readonly secretKey: string | undefined;
+  private readonly requiredCredentials: string | undefined;
 
-  constructor(secretKey?: string) {
-    this.secretKey = secretKey ?? process.env.OWNER_AUTH_SECRET ?? 'vme-canonical-owner-hmac-secret-key-production-32b';
+  constructor(options?: string | OwnerAuthenticationServiceOptions) {
+    if (typeof options === 'string') {
+      this.secretKey = options.trim().length > 0 ? options : undefined;
+      this.requiredCredentials =
+        process.env.OWNER_AUTH_CREDENTIALS?.trim().length
+          ? process.env.OWNER_AUTH_CREDENTIALS
+          : (process.env.OWNER_CREDENTIALS?.trim().length ? process.env.OWNER_CREDENTIALS : undefined);
+    } else if (options && typeof options === 'object') {
+      this.secretKey =
+        options.secretKey && options.secretKey.trim().length > 0
+          ? options.secretKey
+          : (process.env.OWNER_AUTH_SECRET?.trim().length ? process.env.OWNER_AUTH_SECRET : undefined);
+      this.requiredCredentials =
+        options.requiredCredentials && options.requiredCredentials.trim().length > 0
+          ? options.requiredCredentials
+          : (process.env.OWNER_AUTH_CREDENTIALS?.trim().length
+              ? process.env.OWNER_AUTH_CREDENTIALS
+              : (process.env.OWNER_CREDENTIALS?.trim().length ? process.env.OWNER_CREDENTIALS : undefined));
+    } else {
+      this.secretKey = process.env.OWNER_AUTH_SECRET?.trim().length
+        ? process.env.OWNER_AUTH_SECRET
+        : undefined;
+      this.requiredCredentials = process.env.OWNER_AUTH_CREDENTIALS?.trim().length
+        ? process.env.OWNER_AUTH_CREDENTIALS
+        : (process.env.OWNER_CREDENTIALS?.trim().length ? process.env.OWNER_CREDENTIALS : undefined);
+    }
   }
 
+  /**
+   * Generates a cryptographically signed Owner session.
+   * Requires authentic canonical Owner principalId, canonical email, and valid credentials.
+   * Fails closed if signing secret or required credentials configuration is missing.
+   * Prevents non-Owner agents from creating Owner sessions.
+   */
   createOwnerSession(params: {
     principalId: string;
     email: string;
     credentials?: string;
     sessionDurationMs?: number;
   }): OwnerAuthenticatedSession {
+    // 1. Fail closed if HMAC signing secret is missing
+    if (!this.secretKey || this.secretKey.trim().length === 0) {
+      throw new UnauthorizedOwnerDecisionError(
+        'Owner authentication failed: HMAC signing secret is missing. System failed closed.'
+      );
+    }
+
+    // 2. Prevent non-Owner agents from creating Owner sessions (principalId check)
     if (params.principalId !== OWNER_PRINCIPAL_ID && params.principalId !== CANONICAL_OWNER_PRINCIPAL.principalId) {
       throw new UnauthorizedOwnerDecisionError(
         `Owner authentication failed: '${params.principalId}' is not the canonical Owner principal.`
       );
     }
+
+    // 3. Prevent non-Owner agents from creating Owner sessions (email check)
     if (params.email !== CANONICAL_OWNER_PRINCIPAL.email && params.email !== 'stephenikeme@icloud.com') {
       throw new UnauthorizedOwnerDecisionError(
         `Owner authentication failed: email '${params.email}' does not match canonical Owner.`
+      );
+    }
+
+    // 4. Do not authenticate the Owner using only their public ID or email; require credentials
+    if (!params.credentials || params.credentials.trim().length === 0) {
+      throw new UnauthorizedOwnerDecisionError(
+        'Owner authentication failed: required Owner credentials are missing. Identity-only authentication rejected.'
+      );
+    }
+
+    // 5. Fail closed if expected credentials configuration is missing
+    if (!this.requiredCredentials || this.requiredCredentials.trim().length === 0) {
+      throw new UnauthorizedOwnerDecisionError(
+        'Owner authentication failed: required Owner credentials configuration is missing. System failed closed.'
+      );
+    }
+
+    // 6. Timing-safe verification of supplied credentials against configured credentials
+    const credBuf = Buffer.from(params.credentials, 'utf8');
+    const reqBuf = Buffer.from(this.requiredCredentials, 'utf8');
+    if (credBuf.length !== reqBuf.length || !timingSafeEqual(credBuf, reqBuf)) {
+      throw new UnauthorizedOwnerDecisionError(
+        'Owner authentication failed: invalid Owner credentials. Non-owner agents cannot create Owner sessions.'
       );
     }
 
@@ -158,25 +227,44 @@ export class OwnerAuthenticationService {
     };
   }
 
+  /**
+   * Cryptographically verifies an Owner authenticated session or signed token string.
+   * Validates token signature, expiration, revocation status, and session identity.
+   * Fails closed if signing secret is missing.
+   */
   verifyOwnerSession(sessionOrToken: OwnerAuthenticatedSession | string): OwnerSessionClaims {
+    // Fail closed if HMAC signing secret is missing
+    if (!this.secretKey || this.secretKey.trim().length === 0) {
+      throw new UnauthorizedOwnerDecisionError(
+        'Owner authentication failed: HMAC signing secret is missing. System failed closed.'
+      );
+    }
+
     let token: string;
     if (typeof sessionOrToken === 'string') {
-      token = sessionOrToken;
-    } else if (sessionOrToken && typeof sessionOrToken === 'object' && sessionOrToken.token) {
-      token = sessionOrToken.token;
+      token = sessionOrToken.trim();
+    } else if (sessionOrToken && typeof sessionOrToken === 'object' && typeof sessionOrToken.token === 'string') {
+      token = sessionOrToken.token.trim();
     } else {
       throw new UnauthorizedOwnerDecisionError('Invalid Owner session token provided.');
     }
 
+    // Reject identity strings that are not signed tokens
+    if (!token.includes('.')) {
+      throw new UnauthorizedOwnerDecisionError(
+        `Owner authentication failed: identity string '${token}' is not a signed token. Cryptographically signed Owner session required.`
+      );
+    }
+
     const parts = token.split('.');
-    if (parts.length !== 2) {
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
       throw new UnauthorizedOwnerDecisionError('Malformed Owner authorization token format.');
     }
 
     const [payloadB64, signature] = parts;
-    const expectedSig = createHmac('sha256', this.secretKey).update(payloadB64!).digest('hex');
+    const expectedSig = createHmac('sha256', this.secretKey).update(payloadB64).digest('hex');
 
-    const sigBuf = Buffer.from(signature!, 'hex');
+    const sigBuf = Buffer.from(signature, 'hex');
     const expBuf = Buffer.from(expectedSig, 'hex');
 
     if (sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
@@ -185,9 +273,13 @@ export class OwnerAuthenticationService {
 
     let claims: OwnerSessionClaims;
     try {
-      claims = JSON.parse(Buffer.from(payloadB64!, 'base64url').toString('utf8')) as OwnerSessionClaims;
+      claims = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as OwnerSessionClaims;
     } catch {
       throw new UnauthorizedOwnerDecisionError('Corrupted Owner authorization token payload.');
+    }
+
+    if (!claims || typeof claims !== 'object' || !claims.sessionId || !claims.principalId || !claims.expiresAt) {
+      throw new UnauthorizedOwnerDecisionError('Corrupted Owner authorization token claims structure.');
     }
 
     if (this.revokedSessionIds.has(claims.sessionId)) {
@@ -202,6 +294,10 @@ export class OwnerAuthenticationService {
       throw new UnauthorizedOwnerDecisionError(`Principal '${claims.principalId}' is not the canonical Owner.`);
     }
 
+    if (claims.email !== CANONICAL_OWNER_PRINCIPAL.email && claims.email !== 'stephenikeme@icloud.com') {
+      throw new UnauthorizedOwnerDecisionError(`Owner email '${claims.email}' does not match canonical Owner.`);
+    }
+
     return claims;
   }
 
@@ -211,6 +307,11 @@ export class OwnerAuthenticationService {
   }
 
   private signClaims(claims: OwnerSessionClaims): string {
+    if (!this.secretKey) {
+      throw new UnauthorizedOwnerDecisionError(
+        'Owner authentication failed: HMAC signing secret is missing. System failed closed.'
+      );
+    }
     const payloadB64 = Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url');
     const signature = createHmac('sha256', this.secretKey).update(payloadB64).digest('hex');
     return `${payloadB64}.${signature}`;
@@ -363,8 +464,9 @@ export class ConsequentialPolicyEngine {
 
   /**
    * Step 5: Owner Authorization & Sign-off.
-   * Strictly enforces that ONLY authentic Owner principal can approve or reject.
-   * Requires a verified OwnerAuthenticatedSession, signed token, or authentic Owner principal.
+   * Strictly enforces that ONLY authentic Owner principal can approve or reject consequential actions.
+   * Exclusively requires a verified OwnerAuthenticatedSession or cryptographically signed token string.
+   * Authenticating the Owner using only public ID, email, or caller-supplied identity strings is barred.
    */
   async resolveAuthorization(
     requestId: string,
@@ -374,17 +476,15 @@ export class ConsequentialPolicyEngine {
   ): Promise<ConsequentialAuthorizationRecord> {
     let verifiedPrincipal: string;
 
-    if (typeof auth === 'object' && 'token' in auth) {
+    if (typeof auth === 'object' && auth !== null && 'token' in auth && typeof auth.token === 'string') {
       const claims = this.authService.verifyOwnerSession(auth);
       verifiedPrincipal = claims.principalId;
     } else if (typeof auth === 'string' && auth.includes('.')) {
       const claims = this.authService.verifyOwnerSession(auth);
       verifiedPrincipal = claims.principalId;
-    } else if (auth === OWNER_PRINCIPAL_ID || auth === CANONICAL_OWNER_PRINCIPAL.principalId) {
-      verifiedPrincipal = OWNER_PRINCIPAL_ID;
     } else {
       throw new UnauthorizedOwnerDecisionError(
-        `Consequential actions can exclusively be authorized by the Owner principal (Stephen Mendez). Agent or caller '${auth}' cannot approve or reject consequential actions.`
+        `Owner authorization strictly requires a valid cryptographically signed Owner session. Unverified identity or caller string '${typeof auth === 'object' ? JSON.stringify(auth) : auth}' is prohibited.`
       );
     }
 

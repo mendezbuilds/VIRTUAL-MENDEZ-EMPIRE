@@ -4,7 +4,7 @@ import type { Pool } from 'pg';
 import { randomUUID } from 'node:crypto';
 import { DepartmentRegistry } from '@vme/department-hierarchy';
 import { EmergencySupervisor } from '@vme/security-governance';
-import { OWNER_PRINCIPAL_ID } from '@vme/shared-types';
+import { OWNER_PRINCIPAL_ID, CANONICAL_OWNER_PRINCIPAL } from '@vme/shared-types';
 import {
   PostgresMessageStorage,
   PostgresMessageStorageError,
@@ -14,6 +14,7 @@ import {
   ConsequentialPolicyEngine,
   ConsequentialPolicyViolationError,
   UnauthorizedOwnerDecisionError,
+  OwnerAuthenticationService,
   computeParameterHash,
 } from './consequential-policy-engine.js';
 import { DelegationManager } from './delegation-manager.js';
@@ -264,9 +265,16 @@ describe('Durable Agent Communication & Consequential Policy Lifecycle', () => {
   describe('Consequential Action Policy Engine (10-Step Lifecycle)', () => {
     let engine: ConsequentialPolicyEngine;
     let delegation: DelegationManager;
+    let authService: OwnerAuthenticationService;
+    const testSigningSecret = 'vme-test-consequential-owner-hmac-secret-key-32b';
+    const testOwnerCredentials = 'vme-test-owner-master-cryptographic-credentials-2026';
 
     beforeEach(() => {
-      engine = new ConsequentialPolicyEngine({ pool, tenantId });
+      authService = new OwnerAuthenticationService({
+        secretKey: testSigningSecret,
+        requiredCredentials: testOwnerCredentials,
+      });
+      engine = new ConsequentialPolicyEngine({ pool, tenantId, authService });
       const router = new MessageRouter(hierarchy);
       delegation = new DelegationManager(hierarchy, router, engine);
     });
@@ -303,11 +311,22 @@ describe('Durable Agent Communication & Consequential Policy Lifecycle', () => {
         engine.resolveAuthorization(request.id, 'APPROVED', ceo.id, 'CEO auto-approval')
       ).rejects.toThrow(UnauthorizedOwnerDecisionError);
 
-      // Step 5: Authentic Owner approves
+      // Step 5: Identity-only authentication (passing public ID string) is strictly rejected
+      await expect(
+        engine.resolveAuthorization(request.id, 'APPROVED', OWNER_PRINCIPAL_ID)
+      ).rejects.toThrow(UnauthorizedOwnerDecisionError);
+
+      // Step 5: Authentic Owner authenticates with cryptographic session and approves
+      const ownerSession = authService.createOwnerSession({
+        principalId: OWNER_PRINCIPAL_ID,
+        email: CANONICAL_OWNER_PRINCIPAL.email,
+        credentials: testOwnerCredentials,
+      });
+
       const approved = await engine.resolveAuthorization(
         request.id,
         'APPROVED',
-        OWNER_PRINCIPAL_ID,
+        ownerSession,
         'Authorized by Stephen Mendez after risk review'
       );
       expect(approved.status).toBe('APPROVED');
@@ -347,6 +366,7 @@ describe('Durable Agent Communication & Consequential Policy Lifecycle', () => {
       const shortEngine = new ConsequentialPolicyEngine({
         pool,
         tenantId,
+        authService,
         policies: {
           CAPITAL_TRANSFER: {
             actionType: 'CAPITAL_TRANSFER',
@@ -365,9 +385,15 @@ describe('Durable Agent Communication & Consequential Policy Lifecycle', () => {
         payload,
       });
 
+      const ownerSession = authService.createOwnerSession({
+        principalId: OWNER_PRINCIPAL_ID,
+        email: CANONICAL_OWNER_PRINCIPAL.email,
+        credentials: testOwnerCredentials,
+      });
+
       // Resolving expired request throws
       await expect(
-        shortEngine.resolveAuthorization(request.id, 'APPROVED', OWNER_PRINCIPAL_ID)
+        shortEngine.resolveAuthorization(request.id, 'APPROVED', ownerSession)
       ).rejects.toThrow(ConsequentialPolicyViolationError);
     });
 
