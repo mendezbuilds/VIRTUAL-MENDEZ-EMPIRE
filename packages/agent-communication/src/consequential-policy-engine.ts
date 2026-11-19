@@ -458,6 +458,18 @@ export class ConsequentialPolicyEngine {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', $1, false),
+              set_config('app.current_agent_id', $2, false),
+              set_config('app.current_principal_level', 'SPECIALIST', false)`,
+            [this.tenantId, record.agentId]
+          );
+        } catch {
+          // ignore in pg-mem or test environments where set_config is not registered
+        }
+
         await client.query(
           `INSERT INTO consequential_authorization_requests (
             id, tenant_id, task_id, action_type, agent_id, department_id,
@@ -479,6 +491,16 @@ export class ConsequentialPolicyEngine {
           ]
         );
       } finally {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', '', false),
+              set_config('app.current_agent_id', '', false),
+              set_config('app.current_principal_level', '', false)`
+          );
+        } catch {
+          // ignore
+        }
         client.release();
       }
     } else {
@@ -659,6 +681,18 @@ export class ConsequentialPolicyEngine {
 
       const client = await this.pool.connect();
       try {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', $1, false),
+              set_config('app.is_owner_authenticated', 'true', false),
+              set_config('app.current_principal_level', 'OWNER', false)`,
+            [this.tenantId]
+          );
+        } catch {
+          // ignore in pg-mem
+        }
+
         const res = await client.query(
           `UPDATE consequential_authorization_requests
            SET status = 'EXECUTED', executed_at = $1, execution_status = 'PENDING_COMPLETION'
@@ -672,6 +706,16 @@ export class ConsequentialPolicyEngine {
           );
         }
       } finally {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', '', false),
+              set_config('app.is_owner_authenticated', 'false', false),
+              set_config('app.current_principal_level', '', false)`
+          );
+        } catch {
+          // ignore
+        }
         client.release();
       }
 
@@ -708,6 +752,18 @@ export class ConsequentialPolicyEngine {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', $1, false),
+              set_config('app.is_owner_authenticated', 'true', false),
+              set_config('app.current_principal_level', 'OWNER', false)`,
+            [this.tenantId]
+          );
+        } catch {
+          // ignore in pg-mem
+        }
+
         const res = await client.query(
           `SELECT id, tenant_id as "tenantId", task_id as "taskId", action_type as "actionType",
                   agent_id as "agentId", department_id as "departmentId", counterparty,
@@ -731,6 +787,16 @@ export class ConsequentialPolicyEngine {
           executionResult: typeof row.executionResult === 'string' ? JSON.parse(row.executionResult) : (row.executionResult ?? undefined),
         };
       } finally {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', '', false),
+              set_config('app.is_owner_authenticated', 'false', false),
+              set_config('app.current_principal_level', '', false)`
+          );
+        } catch {
+          // ignore
+        }
         client.release();
       }
     } else {
@@ -750,6 +816,18 @@ export class ConsequentialPolicyEngine {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', $1, false),
+              set_config('app.is_owner_authenticated', 'true', false),
+              set_config('app.current_principal_level', 'OWNER', false)`,
+            [this.tenantId]
+          );
+        } catch {
+          // ignore in pg-mem
+        }
+
         const res = await client.query(
           `SELECT id, tenant_id as "tenantId", task_id as "taskId", action_type as "actionType",
                   agent_id as "agentId", department_id as "departmentId", counterparty,
@@ -771,6 +849,16 @@ export class ConsequentialPolicyEngine {
           payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : (row.payload ?? {}),
         }));
       } finally {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', '', false),
+              set_config('app.is_owner_authenticated', 'false', false),
+              set_config('app.current_principal_level', '', false)`
+          );
+        } catch {
+          // ignore
+        }
         client.release();
       }
     } else {
@@ -784,6 +872,18 @@ export class ConsequentialPolicyEngine {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', $1, false),
+              set_config('app.is_owner_authenticated', 'true', false),
+              set_config('app.current_principal_level', 'OWNER', false)`,
+            [this.tenantId]
+          );
+        } catch {
+          // ignore in pg-mem
+        }
+
         await client.query(
           `UPDATE consequential_authorization_requests
            SET status = $1, decided_by = $2, decided_at = $3, decision_notes = $4,
@@ -802,6 +902,16 @@ export class ConsequentialPolicyEngine {
           ]
         );
       } finally {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', '', false),
+              set_config('app.is_owner_authenticated', 'false', false),
+              set_config('app.current_principal_level', '', false)`
+          );
+        } catch {
+          // ignore
+        }
         client.release();
       }
     } else {

@@ -453,6 +453,12 @@ export class TaskExecutionRecorder {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
+        try {
+          await client.query(`SELECT set_config('app.current_tenant_id', $1, true)`, [this.tenantId]);
+        } catch {
+          // ignore in pg-mem
+        }
+
         await client.query(
           `INSERT INTO task_execution_records (
             id, tenant_id, task_id, assigned_agent_id, tool_invoked,
@@ -470,6 +476,11 @@ export class TaskExecutionRecorder {
           ]
         );
       } finally {
+        try {
+          await client.query(`SELECT set_config('app.current_tenant_id', '', false)`);
+        } catch {
+          // ignore
+        }
         client.release();
       }
     }
@@ -502,6 +513,12 @@ export class TaskExecutionRecorder {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
+        try {
+          await client.query(`SELECT set_config('app.current_tenant_id', $1, true)`, [this.tenantId]);
+        } catch {
+          // ignore in pg-mem
+        }
+
         await client.query(
           `UPDATE task_execution_records
            SET execution_status = $1, completed_at = $2, duration_ms = $3,
@@ -521,6 +538,11 @@ export class TaskExecutionRecorder {
           ]
         );
       } finally {
+        try {
+          await client.query(`SELECT set_config('app.current_tenant_id', '', false)`);
+        } catch {
+          // ignore
+        }
         client.release();
       }
     }

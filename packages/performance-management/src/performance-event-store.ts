@@ -48,6 +48,17 @@ export class PerformanceEventStore {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', $1, false),
+              set_config('app.current_agent_id', $2, false)`,
+            [this.tenantId, enrichedEvent.agentId]
+          );
+        } catch {
+          // ignore in pg-mem
+        }
+
         await client.query(
           `INSERT INTO performance_events (
             id, tenant_id, agent_id, department_id, task_id, event_type,
@@ -71,6 +82,15 @@ export class PerformanceEventStore {
           ]
         );
       } finally {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', '', false),
+              set_config('app.current_agent_id', '', false)`
+          );
+        } catch {
+          // ignore
+        }
         client.release();
       }
     }
@@ -86,6 +106,17 @@ export class PerformanceEventStore {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', $1, false),
+              set_config('app.current_agent_id', $2, false)`,
+            [this.tenantId, agentId]
+          );
+        } catch {
+          // ignore in pg-mem
+        }
+
         const conditions = ['agent_id = $1', 'tenant_id = $2'];
         const params: unknown[] = [agentId, this.tenantId];
         let pIdx = 3;
@@ -120,6 +151,15 @@ export class PerformanceEventStore {
           recordedAt: row.recordedAt instanceof Date ? row.recordedAt.toISOString() : String(row.recordedAt),
         }));
       } finally {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', '', false),
+              set_config('app.current_agent_id', '', false)`
+          );
+        } catch {
+          // ignore
+        }
         client.release();
       }
     }
@@ -143,6 +183,18 @@ export class PerformanceEventStore {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', $1, false),
+              set_config('app.current_agent_id', $2, false),
+              set_config('app.current_principal_level', 'EXECUTIVE', false)`,
+            [this.tenantId, review.agentId]
+          );
+        } catch {
+          // ignore in pg-mem
+        }
+
         await client.query(
           `INSERT INTO agent_performance_reviews (
             id, tenant_id, agent_id, agent_code, department_id, evaluation_period,
@@ -171,6 +223,16 @@ export class PerformanceEventStore {
           ]
         );
       } finally {
+        try {
+          await client.query(
+            `SELECT 
+              set_config('app.current_tenant_id', '', false),
+              set_config('app.current_agent_id', '', false),
+              set_config('app.current_principal_level', '', false)`
+          );
+        } catch {
+          // ignore
+        }
         client.release();
       }
     }

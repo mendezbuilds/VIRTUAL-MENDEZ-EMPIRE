@@ -3,7 +3,8 @@ import { Pool } from 'pg';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
   OWNER_PRINCIPAL_ID,
   CANONICAL_OWNER_PRINCIPAL,
@@ -15,6 +16,8 @@ import {
   ConsequentialPolicyEngine,
   OwnerAuthenticationService,
   DelegationManager,
+  computeParameterHash,
+  type ConsequentialAuthorizationRecord,
 } from '@vme/agent-communication';
 import {
   AgentMemoryEngine,
@@ -469,42 +472,90 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
       expect(val).toBeUndefined();
     });
 
-    it('verifies pooled connection context reset across single-connection reuse', async () => {
+    it('verifies withSessionRls() resets pooled connection context on both success and error rollback', async () => {
       // Create a 1-connection pool to guarantee connection reuse
       const singleConnPool = createAppPool(DEFAULT_PG_CONFIG, 1);
 
       try {
-        const client1 = await singleConnPool.connect();
-        try {
-          await client1.query('BEGIN');
-          await client1.query(`
-            SELECT 
-              set_config('app.current_tenant_id', $1, true),
-              set_config('app.current_agent_id', $2, true)
-          `, [tenantId, '00000000-0000-0000-0000-000000000099']);
-          await client1.query('COMMIT');
-        } finally {
-          // Explicit cleanup as in withSessionRls
-          await client1.query(`
-            SELECT 
-              set_config('app.current_tenant_id', '', false),
-              set_config('app.current_agent_id', '', false)
-          `);
-          client1.release();
-        }
+        // 1. Successful transaction using actual withSessionRls() implementation
+        const testContext = {
+          tenantId: '00000000-0000-0000-0000-000000000001',
+          agentId: '00000000-0000-0000-0000-000000000099',
+          departmentId: 'technology_engineering',
+          principalLevel: 'OWNER',
+          isOwnerAuthenticated: true,
+        };
 
-        // Acquire the exact same connection again without setting context
-        const client2 = await singleConnPool.connect();
-        try {
-          const res = await client2.query(`
+        await withSessionRls(singleConnPool, testContext, async (client) => {
+          const res = await client.query(`
             SELECT 
               current_setting('app.current_tenant_id', true) as tenant,
-              current_setting('app.current_agent_id', true) as agent
+              current_setting('app.current_agent_id', true) as agent,
+              current_setting('app.current_department_id', true) as dept,
+              current_setting('app.current_principal_level', true) as level,
+              current_setting('app.is_owner_authenticated', true) as owner
+          `);
+          expect(res.rows[0].tenant).toBe(testContext.tenantId);
+          expect(res.rows[0].agent).toBe(testContext.agentId);
+          expect(res.rows[0].dept).toBe(testContext.departmentId);
+          expect(res.rows[0].level).toBe('OWNER');
+          expect(res.rows[0].owner).toBe('true');
+          return true;
+        });
+
+        // Reacquire that exact same physical connection from the single-connection pool
+        const checkClient1 = await singleConnPool.connect();
+        try {
+          const res = await checkClient1.query(`
+            SELECT 
+              current_setting('app.current_tenant_id', true) as tenant,
+              current_setting('app.current_agent_id', true) as agent,
+              current_setting('app.current_department_id', true) as dept,
+              current_setting('app.current_principal_level', true) as level,
+              current_setting('app.is_owner_authenticated', true) as owner
           `);
           expect(res.rows[0].tenant).toBe('');
           expect(res.rows[0].agent).toBe('');
+          expect(res.rows[0].dept).toBe('');
+          expect(res.rows[0].level).toBe('');
+          expect(res.rows[0].owner).toBe('false');
         } finally {
-          client2.release();
+          checkClient1.release();
+        }
+
+        // 2. Failed transaction using actual withSessionRls() implementation
+        const failContext = {
+          tenantId: '00000000-0000-0000-0000-000000000002',
+          agentId: '00000000-0000-0000-0000-000000000088',
+          departmentId: 'financial_intelligence',
+          principalLevel: 'DIRECTOR',
+          isOwnerAuthenticated: false,
+        };
+
+        await expect(
+          withSessionRls(singleConnPool, failContext, async () => {
+            throw new Error('Forced transaction failure for rollback verification');
+          })
+        ).rejects.toThrow(/Forced transaction failure for rollback verification/);
+
+        // Reacquire the same physical connection again; prove no context leaked after error
+        const checkClient2 = await singleConnPool.connect();
+        try {
+          const res = await checkClient2.query(`
+            SELECT 
+              current_setting('app.current_tenant_id', true) as tenant,
+              current_setting('app.current_agent_id', true) as agent,
+              current_setting('app.current_department_id', true) as dept,
+              current_setting('app.current_principal_level', true) as level,
+              current_setting('app.is_owner_authenticated', true) as owner
+          `);
+          expect(res.rows[0].tenant).toBe('');
+          expect(res.rows[0].agent).toBe('');
+          expect(res.rows[0].dept).toBe('');
+          expect(res.rows[0].level).toBe('');
+          expect(res.rows[0].owner).toBe('false');
+        } finally {
+          checkClient2.release();
         }
       } finally {
         await singleConnPool.end();
@@ -596,52 +647,69 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
   // Section 6: Concurrent Approval Claims Using Separate Connections (Req 6)
   // ==========================================================================
   describe('6. Concurrent Approval Claims Using Separate Database Connections', () => {
-    it('ensures exactly one execution claims an approved request across concurrent connections', async () => {
+    it('exercises ConsequentialPolicyEngine.claimApprovalForExecution() under vme_app with separate physical connections', async () => {
       const requestId = `req-pg-concurrency-${randomUUID()}`;
       const taskId = randomUUID();
       const agentId = randomUUID();
+      const payload = { amount: 1000, recipient: 'vendor-ops' };
+      const paramHash = computeParameterHash(payload);
 
-      // 1. Seed an APPROVED request into consequential_authorization_requests
-      await adminPool.query(`
-        INSERT INTO consequential_authorization_requests (
-          id, tenant_id, task_id, action_type, agent_id, department_id,
-          parameter_hash, payload, status, requested_at, valid_until
-        ) VALUES (
-          $1, $2, $3, 'CAPITAL_TRANSFER', $4, 'financial_intelligence',
-          'paramhash123', '{"amount": 1000}', 'APPROVED', NOW(), NOW() + INTERVAL '1 hour'
-        )
-      `, [requestId, tenantId, taskId, agentId]);
-
-      // 2. Launch 2 distinct workers on separate pool clients attempting atomic conditional update
-      const claimWorker = async (workerId: string) => {
-        const client = await adminPool.connect();
-        try {
-          const res = await client.query(`
-            UPDATE consequential_authorization_requests
-            SET status = 'EXECUTED', executed_at = NOW(), execution_status = 'PENDING_COMPLETION'
-            WHERE id = $1 AND tenant_id = $2 AND status = 'APPROVED'
-            RETURNING id
-          `, [requestId, tenantId]);
-          return { workerId, claimed: res.rows.length > 0 };
-        } finally {
-          client.release();
+      // 1. Seed an APPROVED request into consequential_authorization_requests via withSessionRls under appPool (vme_app role)
+      await withSessionRls(
+        appPool,
+        { tenantId, agentId, principalLevel: 'OWNER', isOwnerAuthenticated: true },
+        async (client) => {
+          await client.query(`
+            INSERT INTO consequential_authorization_requests (
+              id, tenant_id, task_id, action_type, agent_id, department_id,
+              parameter_hash, payload, status, requested_at, valid_until
+            ) VALUES (
+              $1, $2, $3, 'CAPITAL_TRANSFER', $4, 'financial_intelligence',
+              $5, $6, 'APPROVED', NOW(), NOW() + INTERVAL '1 hour'
+            )
+          `, [requestId, tenantId, taskId, agentId, paramHash, JSON.stringify(payload)]);
         }
-      };
-
-      const [resA, resB] = await Promise.all([claimWorker('A'), claimWorker('B')]);
-      const totalClaimed = (resA.claimed ? 1 : 0) + (resB.claimed ? 1 : 0);
-
-      expect(totalClaimed).toBe(1);
-      expect(resA.claimed !== resB.claimed).toBe(true);
-
-      // Verify final state in PostgreSQL
-      const verifyRes = await adminPool.query(
-        'SELECT status, execution_status, executed_at FROM consequential_authorization_requests WHERE id = $1',
-        [requestId]
       );
-      expect(verifyRes.rows[0].status).toBe('EXECUTED');
-      expect(verifyRes.rows[0].execution_status).toBe('PENDING_COMPLETION');
-      expect(verifyRes.rows[0].executed_at).toBeDefined();
+
+      // 2. Instantiate 2 separate 1-connection pools for vme_app to guarantee separate physical connections
+      const poolA = createAppPool(DEFAULT_PG_CONFIG, 1);
+      const poolB = createAppPool(DEFAULT_PG_CONFIG, 1);
+
+      try {
+        const engineA = new ConsequentialPolicyEngine({ pool: poolA, tenantId });
+        const engineB = new ConsequentialPolicyEngine({ pool: poolB, tenantId });
+
+        // 3. Concurrently claim approval using ConsequentialPolicyEngine across separate physical connections
+        const [resA, resB] = await Promise.allSettled([
+          engineA.claimApprovalForExecution(requestId, payload),
+          engineB.claimApprovalForExecution(requestId, payload),
+        ]);
+
+        const fulfilled = [resA, resB].filter((r): r is PromiseFulfilledResult<ConsequentialAuthorizationRecord> => r.status === 'fulfilled');
+        const rejected = [resA, resB].filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+
+        // Exactly one concurrent claimant must succeed
+        expect(fulfilled).toHaveLength(1);
+        expect(rejected).toHaveLength(1);
+
+        const winnerRecord = fulfilled[0]!.value;
+        expect(winnerRecord.status).toBe('EXECUTED');
+        expect(winnerRecord.executionStatus).toBe('PENDING_COMPLETION');
+        expect(winnerRecord.executedAt).toBeDefined();
+
+        const loserError = rejected[0]!.reason;
+        expect(loserError.message).toMatch(/Concurrent execution detected/i);
+
+        // 4. Verify persisted authorization record and execution state in PostgreSQL using vme_app
+        const persistedRecord = await engineA.getRequestById(requestId);
+        expect(persistedRecord).toBeDefined();
+        expect(persistedRecord?.status).toBe('EXECUTED');
+        expect(persistedRecord?.executionStatus).toBe('PENDING_COMPLETION');
+        expect(persistedRecord?.executedAt).toBeDefined();
+      } finally {
+        await poolA.end();
+        await poolB.end();
+      }
     });
   });
 
@@ -649,18 +717,21 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
   // Section 7: Durable Persistence & Process Restart Recovery (Req 7)
   // ==========================================================================
   describe('7. Durable Persistence & Process Restart Recovery Across Connections', () => {
-    it('persists and reconstitutes quad-tier memory, playbooks, and events across process death', async () => {
+    it('persists and recovers quad-tier memory, authorization requests, and performance events across pool destruction using vme_app', async () => {
       const restartTenantId = tenantId;
       const agentId = randomUUID();
       const taskId = randomUUID();
       const playbookId = randomUUID();
+      const authRequestId = `req-persist-${randomUUID()}`;
 
-      // --- PHASE A: Application Process 1 writes data to PostgreSQL ---
-      const pool1 = createAdminPool();
+      // --- PHASE A: Application writes state to PostgreSQL strictly using vme_app role ---
+      const pool1 = createAppPool();
       try {
+        // 1. Working memory
         const working1 = new PostgresWorkingStorage(pool1, { tenantId: restartTenantId, agentId, principalLevel: 'SPECIALIST' });
         await working1.set(taskId, 'restart_token', 'persist_ok');
 
+        // 2. Episodic memory
         const episodic1 = new PostgresEpisodicStorage(pool1, {
           tenantId: restartTenantId,
           agentId,
@@ -684,11 +755,12 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
           recordedAt: new Date().toISOString(),
         });
 
+        // 3. Semantic memory
         const semantic1 = new PostgresSemanticStorage(pool1, {
           tenantId: restartTenantId,
           agentId,
           departmentId: 'technology_engineering',
-          principalLevel: 'SPECIALIST',
+          principalLevel: 'EXECUTIVE',
         });
         await semantic1.insert({
           id: randomUUID(),
@@ -711,11 +783,12 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
           createdAt: new Date().toISOString(),
         });
 
+        // 4. Procedural memory
         const procedural1 = new PostgresProceduralStorage(pool1, {
           tenantId: restartTenantId,
           agentId,
           departmentId: 'technology_engineering',
-          principalLevel: 'DIRECTOR',
+          principalLevel: 'EXECUTIVE',
         });
         await procedural1.savePlaybook({
           id: playbookId,
@@ -745,6 +818,22 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
           createdAt: new Date().toISOString(),
         });
 
+        // 5. Authorization record via ConsequentialPolicyEngine
+        const policyEngine1 = new ConsequentialPolicyEngine({
+          pool: pool1,
+          tenantId: restartTenantId,
+        });
+        const reqPayload = { action: 'NODE_RECOVERY', target: 'cluster-01' };
+        await policyEngine1.quarantineAction({
+          id: authRequestId,
+          actionType: 'EXTERNAL_OUTREACH',
+          agentId,
+          departmentId: 'technology_engineering',
+          taskId,
+          payload: reqPayload,
+        });
+
+        // 6. Performance event via PerformanceEventStore
         const eventStore1 = new PerformanceEventStore(pool1, restartTenantId);
         await eventStore1.recordEvent({
           agentId,
@@ -757,17 +846,19 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
           isSuccessful: true,
         });
       } finally {
-        // Destroy Process 1 pool completely
+        // Destroy Process 1 pool and all physical connections completely
         await pool1.end();
       }
 
-      // --- PHASE B: Application Process 2 starts up fresh and recovers data ---
-      const pool2 = createAdminPool();
+      // --- PHASE B: Application Process 2 starts up fresh with new pool and recovers state under vme_app ---
+      const pool2 = createAppPool();
       try {
+        // 1. Working memory recovery
         const working2 = new PostgresWorkingStorage(pool2, { tenantId: restartTenantId, agentId, principalLevel: 'SPECIALIST' });
         const val = await working2.get(taskId, 'restart_token');
         expect(val).toBe('persist_ok');
 
+        // 2. Episodic memory recovery under correct agent RLS context
         const episodic2 = new PostgresEpisodicStorage(pool2, {
           tenantId: restartTenantId,
           agentId,
@@ -778,6 +869,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         expect(epRecords.length).toBeGreaterThanOrEqual(1);
         expect(epRecords.some((r) => r.inputSummary === 'Pre-restart diagnostics')).toBe(true);
 
+        // 3. Semantic memory recovery with cosine similarity vector search
         const semantic2 = new PostgresSemanticStorage(pool2, {
           tenantId: restartTenantId,
           agentId,
@@ -796,8 +888,9 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         );
         expect(semSearch.length).toBeGreaterThanOrEqual(1);
         expect(semSearch[0]?.item.title).toBe('Durable Recovery Architecture');
-        expect(semSearch[0]?.similarity).toBeGreaterThan(0.99); // Cosine similarity with identical vector
+        expect(semSearch[0]?.similarity).toBeGreaterThan(0.99);
 
+        // 4. Procedural memory recovery
         const procedural2 = new PostgresProceduralStorage(pool2, {
           tenantId: restartTenantId,
           agentId,
@@ -808,14 +901,76 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         expect(playbook).toBeDefined();
         expect(playbook?.isApproved).toBe(true);
 
+        // 5. Authorization request recovery under vme_app
+        const policyEngine2 = new ConsequentialPolicyEngine({
+          pool: pool2,
+          tenantId: restartTenantId,
+        });
+        const authRecord = await policyEngine2.getRequestById(authRequestId);
+        expect(authRecord).toBeDefined();
+        expect(authRecord?.status).toBe('PENDING_OWNER_REVIEW');
+
+        // 6. Performance event recovery under vme_app
         const eventStore2 = new PerformanceEventStore(pool2, restartTenantId);
         const events = await eventStore2.getAgentEvents(agentId);
         expect(events.length).toBeGreaterThanOrEqual(1);
         expect(events[0]?.durationMs).toBe(420);
         expect(events[0]?.costUsd).toBe(0.003);
+
+        // 7. Verify cross-tenant isolation under vme_app (foreign tenant sees 0 rows)
+        const foreignWorking = new PostgresWorkingStorage(pool2, {
+          tenantId: tenant2Id,
+          agentId,
+          principalLevel: 'SPECIALIST',
+        });
+        const foreignVal = await foreignWorking.get(taskId, 'restart_token');
+        expect(foreignVal).toBeUndefined();
       } finally {
         await pool2.end();
       }
+    });
+
+    it('verifies durable persistence and state recovery across genuine child process restarts under vme_app', async () => {
+      const workerScript = resolve(__dirname, 'process-restart-worker.cjs');
+      const childTenantId = tenantId;
+      const childAgentId = randomUUID();
+      const childTaskId = randomUUID();
+      const childRecordId = randomUUID();
+
+      const nodeModulesDir = resolve(__dirname, '../node_modules');
+      const env = {
+        ...process.env,
+        NODE_PATH: nodeModulesDir,
+        VME_POSTGRES_HOST: DEFAULT_PG_CONFIG.host,
+        VME_POSTGRES_PORT: String(DEFAULT_PG_CONFIG.port),
+        VME_POSTGRES_APP_USER: DEFAULT_PG_CONFIG.appUser,
+        VME_POSTGRES_APP_PASSWORD: DEFAULT_PG_CONFIG.appPassword,
+        VME_POSTGRES_DB: DEFAULT_PG_CONFIG.database,
+      };
+
+      // Process 1: Starts as independent OS process, connects as vme_app, writes state, and terminates
+      const proc1 = spawnSync(
+        process.execPath,
+        [workerScript, 'write', childTenantId, childAgentId, childTaskId, childRecordId],
+        { env, encoding: 'utf8' }
+      );
+      if (proc1.status !== 0) {
+        throw new Error(`Child Process 1 failed: ${proc1.stderr || proc1.stdout}`);
+      }
+      expect(proc1.status).toBe(0);
+      expect(proc1.stdout).toContain('WRITE_COMPLETE');
+
+      // Process 2: Starts independently in a fresh OS process, reconnects as vme_app, and recovers state
+      const proc2 = spawnSync(
+        process.execPath,
+        [workerScript, 'read', childTenantId, childAgentId, childTaskId, childRecordId],
+        { env, encoding: 'utf8' }
+      );
+      if (proc2.status !== 0) {
+        throw new Error(`Child Process 2 failed: ${proc2.stderr || proc2.stdout}`);
+      }
+      expect(proc2.status).toBe(0);
+      expect(proc2.stdout).toContain('READ_COMPLETE');
     });
   });
 
@@ -1051,7 +1206,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
 
       const pendingRequests = await policyEngine.getPendingRequests();
       expect(pendingRequests.length).toBeGreaterThanOrEqual(1);
-      const approvalReq = pendingRequests[0]!;
+      const approvalReq = pendingRequests.find((r) => r.taskId === quarantinedTask.id) ?? pendingRequests[pendingRequests.length - 1]!;
       expect(approvalReq.status).toBe('PENDING_OWNER_REVIEW');
 
       // Owner issues cryptographically signed session token
