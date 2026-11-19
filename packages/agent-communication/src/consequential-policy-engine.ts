@@ -723,6 +723,10 @@ export class ConsequentialPolicyEngine {
         const row = res.rows[0];
         return {
           ...row,
+          validUntil: row.validUntil instanceof Date ? row.validUntil.toISOString() : String(row.validUntil),
+          requestedAt: row.requestedAt instanceof Date ? row.requestedAt.toISOString() : String(row.requestedAt),
+          decidedAt: row.decidedAt instanceof Date ? row.decidedAt.toISOString() : (row.decidedAt ? String(row.decidedAt) : undefined),
+          executedAt: row.executedAt instanceof Date ? row.executedAt.toISOString() : (row.executedAt ? String(row.executedAt) : undefined),
           payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : (row.payload ?? {}),
           executionResult: typeof row.executionResult === 'string' ? JSON.parse(row.executionResult) : (row.executionResult ?? undefined),
         };
@@ -760,6 +764,10 @@ export class ConsequentialPolicyEngine {
         );
         return res.rows.map((row) => ({
           ...row,
+          validUntil: row.validUntil instanceof Date ? row.validUntil.toISOString() : String(row.validUntil),
+          requestedAt: row.requestedAt instanceof Date ? row.requestedAt.toISOString() : String(row.requestedAt),
+          decidedAt: row.decidedAt instanceof Date ? row.decidedAt.toISOString() : (row.decidedAt ? String(row.decidedAt) : undefined),
+          executedAt: row.executedAt instanceof Date ? row.executedAt.toISOString() : (row.executedAt ? String(row.executedAt) : undefined),
           payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : (row.payload ?? {}),
         }));
       } finally {

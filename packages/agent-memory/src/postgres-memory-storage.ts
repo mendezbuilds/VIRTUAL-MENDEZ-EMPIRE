@@ -442,7 +442,7 @@ export class PostgresSemanticStorage implements SemanticStorage {
           item.supersedesId ?? null,
           item.isDeprecated,
           JSON.stringify(item.metadata ?? {}),
-          item.createdAt,
+          item.createdAt ?? new Date().toISOString(),
         ]
       );
     });

@@ -192,6 +192,13 @@ ALTER TABLE performance_events FORCE ROW LEVEL SECURITY;
 ALTER TABLE agent_performance_reviews ENABLE ROW LEVEL SECURITY;
 ALTER TABLE agent_performance_reviews FORCE ROW LEVEL SECURITY;
 
+-- Drop existing policies if any
+DROP POLICY IF EXISTS comm_envelopes_abac_policy ON agent_communication_envelopes;
+DROP POLICY IF EXISTS conseq_auth_abac_policy ON consequential_authorization_requests;
+DROP POLICY IF EXISTS task_exec_abac_policy ON task_execution_records;
+DROP POLICY IF EXISTS perf_events_abac_policy ON performance_events;
+DROP POLICY IF EXISTS perf_reviews_abac_policy ON agent_performance_reviews;
+
 -- Communication Envelopes RLS
 CREATE POLICY comm_envelopes_abac_policy ON agent_communication_envelopes
 FOR ALL USING (

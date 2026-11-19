@@ -207,11 +207,22 @@ ALTER TABLE agent_semantic_memories FORCE ROW LEVEL SECURITY;
 ALTER TABLE agent_procedural_memories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE agent_procedural_memories FORCE ROW LEVEL SECURITY;
 
--- Drop existing generic policies if any
+-- Drop existing generic and ABAC policies if any
 DROP POLICY IF EXISTS working_mem_tenant_policy ON agent_working_memories;
 DROP POLICY IF EXISTS episodic_mem_tenant_policy ON agent_episodic_memories;
 DROP POLICY IF EXISTS semantic_mem_tenant_policy ON agent_semantic_memories;
 DROP POLICY IF EXISTS procedural_mem_tenant_policy ON agent_procedural_memories;
+
+DROP POLICY IF EXISTS working_mem_abac_policy ON agent_working_memories;
+DROP POLICY IF EXISTS episodic_mem_abac_select_policy ON agent_episodic_memories;
+DROP POLICY IF EXISTS episodic_mem_abac_insert_policy ON agent_episodic_memories;
+DROP POLICY IF EXISTS episodic_mem_abac_delete_policy ON agent_episodic_memories;
+DROP POLICY IF EXISTS semantic_mem_abac_select_policy ON agent_semantic_memories;
+DROP POLICY IF EXISTS semantic_mem_abac_write_policy ON agent_semantic_memories;
+DROP POLICY IF EXISTS semantic_mem_abac_update_policy ON agent_semantic_memories;
+DROP POLICY IF EXISTS procedural_mem_abac_select_policy ON agent_procedural_memories;
+DROP POLICY IF EXISTS procedural_mem_abac_write_policy ON agent_procedural_memories;
+DROP POLICY IF EXISTS procedural_mem_abac_update_policy ON agent_procedural_memories;
 
 -- A. Working Memory RLS
 CREATE POLICY working_mem_abac_policy ON agent_working_memories
