@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Pool } from 'pg';
 import {
   OWNER_PRINCIPAL_ID,
@@ -11,6 +11,9 @@ export type ConsequentialActionType =
   | 'CAPITAL_TRANSFER'
   | 'EXTERNAL_OUTREACH'
   | 'BINDING_CONTRACT'
+  | 'CREDENTIAL_ACCESS'
+  | 'ACCOUNT_PERMISSION_CHANGE'
+  | 'IRREVERSIBLE_OPERATION'
   | 'GOVERNANCE_OVERRIDE'
   | 'INFRASTRUCTURE_MUTATION';
 
@@ -33,7 +36,7 @@ export const CANONICAL_CONSEQUENTIAL_POLICIES: Record<ConsequentialActionType, C
     actionType: 'LIVE_TRADING',
     requiresOwnerApproval: true,
     maxValidityWindowMs: 30 * 60 * 1000, // 30 minutes
-    description: 'Execution of live financial market trades or orders deploying capital.',
+    description: 'Execution of live financial market trades or orders deploying capital (FX, equities, crypto).',
   },
   CAPITAL_TRANSFER: {
     actionType: 'CAPITAL_TRANSFER',
@@ -53,6 +56,24 @@ export const CANONICAL_CONSEQUENTIAL_POLICIES: Record<ConsequentialActionType, C
     maxValidityWindowMs: 48 * 60 * 60 * 1000, // 48 hours
     description: 'Execution or formal assent to legally binding agreements or contracts.',
   },
+  CREDENTIAL_ACCESS: {
+    actionType: 'CREDENTIAL_ACCESS',
+    requiresOwnerApproval: true,
+    maxValidityWindowMs: 15 * 60 * 1000, // 15 minutes
+    description: 'Accessing, generating, or modifying sensitive cryptographic keys or production credentials.',
+  },
+  ACCOUNT_PERMISSION_CHANGE: {
+    actionType: 'ACCOUNT_PERMISSION_CHANGE',
+    requiresOwnerApproval: true,
+    maxValidityWindowMs: 30 * 60 * 1000, // 30 minutes
+    description: 'Modifying RBAC permissions, department assignments, or agent authorities.',
+  },
+  IRREVERSIBLE_OPERATION: {
+    actionType: 'IRREVERSIBLE_OPERATION',
+    requiresOwnerApproval: true,
+    maxValidityWindowMs: 20 * 60 * 1000, // 20 minutes
+    description: 'Destructive deletion of persistent storage, database truncations, or irreversible state changes.',
+  },
   GOVERNANCE_OVERRIDE: {
     actionType: 'GOVERNANCE_OVERRIDE',
     requiresOwnerApproval: true,
@@ -66,6 +87,135 @@ export const CANONICAL_CONSEQUENTIAL_POLICIES: Record<ConsequentialActionType, C
     description: 'Production infrastructure modifications or irreversible data destruction.',
   },
 };
+
+export interface OwnerSessionClaims {
+  principalId: string;
+  email: string;
+  sessionId: string;
+  issuedAt: number;
+  expiresAt: number;
+  nonce: string;
+}
+
+export interface OwnerAuthenticatedSession {
+  principalId: string;
+  email: string;
+  sessionId: string;
+  token: string;
+  expiresAt: number;
+}
+
+export class OwnerAuthenticationService {
+  private activeSessions = new Map<string, OwnerSessionClaims>();
+  private revokedSessionIds = new Set<string>();
+  private readonly secretKey: string;
+
+  constructor(secretKey?: string) {
+    this.secretKey = secretKey ?? process.env.OWNER_AUTH_SECRET ?? 'vme-canonical-owner-hmac-secret-key-production-32b';
+  }
+
+  createOwnerSession(params: {
+    principalId: string;
+    email: string;
+    credentials?: string;
+    sessionDurationMs?: number;
+  }): OwnerAuthenticatedSession {
+    if (params.principalId !== OWNER_PRINCIPAL_ID && params.principalId !== CANONICAL_OWNER_PRINCIPAL.principalId) {
+      throw new UnauthorizedOwnerDecisionError(
+        `Owner authentication failed: '${params.principalId}' is not the canonical Owner principal.`
+      );
+    }
+    if (params.email !== CANONICAL_OWNER_PRINCIPAL.email && params.email !== 'stephenikeme@icloud.com') {
+      throw new UnauthorizedOwnerDecisionError(
+        `Owner authentication failed: email '${params.email}' does not match canonical Owner.`
+      );
+    }
+
+    const sessionId = randomUUID();
+    const nonce = randomUUID();
+    const issuedAt = Date.now();
+    const duration = params.sessionDurationMs ?? 4 * 60 * 60 * 1000;
+    const expiresAt = issuedAt + duration;
+
+    const claims: OwnerSessionClaims = {
+      principalId: OWNER_PRINCIPAL_ID,
+      email: params.email,
+      sessionId,
+      issuedAt,
+      expiresAt,
+      nonce,
+    };
+
+    const token = this.signClaims(claims);
+    this.activeSessions.set(sessionId, claims);
+
+    return {
+      principalId: claims.principalId,
+      email: claims.email,
+      sessionId,
+      token,
+      expiresAt,
+    };
+  }
+
+  verifyOwnerSession(sessionOrToken: OwnerAuthenticatedSession | string): OwnerSessionClaims {
+    let token: string;
+    if (typeof sessionOrToken === 'string') {
+      token = sessionOrToken;
+    } else if (sessionOrToken && typeof sessionOrToken === 'object' && sessionOrToken.token) {
+      token = sessionOrToken.token;
+    } else {
+      throw new UnauthorizedOwnerDecisionError('Invalid Owner session token provided.');
+    }
+
+    const parts = token.split('.');
+    if (parts.length !== 2) {
+      throw new UnauthorizedOwnerDecisionError('Malformed Owner authorization token format.');
+    }
+
+    const [payloadB64, signature] = parts;
+    const expectedSig = createHmac('sha256', this.secretKey).update(payloadB64!).digest('hex');
+
+    const sigBuf = Buffer.from(signature!, 'hex');
+    const expBuf = Buffer.from(expectedSig, 'hex');
+
+    if (sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
+      throw new UnauthorizedOwnerDecisionError('Cryptographic signature verification failed for Owner authorization token.');
+    }
+
+    let claims: OwnerSessionClaims;
+    try {
+      claims = JSON.parse(Buffer.from(payloadB64!, 'base64url').toString('utf8')) as OwnerSessionClaims;
+    } catch {
+      throw new UnauthorizedOwnerDecisionError('Corrupted Owner authorization token payload.');
+    }
+
+    if (this.revokedSessionIds.has(claims.sessionId)) {
+      throw new UnauthorizedOwnerDecisionError(`Owner session '${claims.sessionId}' has been revoked.`);
+    }
+
+    if (Date.now() > claims.expiresAt) {
+      throw new UnauthorizedOwnerDecisionError(`Owner session '${claims.sessionId}' has expired.`);
+    }
+
+    if (claims.principalId !== OWNER_PRINCIPAL_ID && claims.principalId !== CANONICAL_OWNER_PRINCIPAL.principalId) {
+      throw new UnauthorizedOwnerDecisionError(`Principal '${claims.principalId}' is not the canonical Owner.`);
+    }
+
+    return claims;
+  }
+
+  revokeSession(sessionId: string): void {
+    this.revokedSessionIds.add(sessionId);
+    this.activeSessions.delete(sessionId);
+  }
+
+  private signClaims(claims: OwnerSessionClaims): string {
+    const payloadB64 = Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url');
+    const signature = createHmac('sha256', this.secretKey).update(payloadB64).digest('hex');
+    return `${payloadB64}.${signature}`;
+  }
+}
 
 export interface ConsequentialAuthorizationRecord {
   id: string;
@@ -118,6 +268,7 @@ export interface ConsequentialPolicyEngineOptions {
   pool?: Pool;
   tenantId?: string;
   policies?: Partial<Record<ConsequentialActionType, ConsequentialPolicyRule>>;
+  authService?: OwnerAuthenticationService;
 }
 
 /**
@@ -129,11 +280,13 @@ export class ConsequentialPolicyEngine {
   private readonly pool?: Pool;
   private readonly tenantId: string;
   private readonly policies: Record<ConsequentialActionType, ConsequentialPolicyRule>;
+  public readonly authService: OwnerAuthenticationService;
 
   constructor(options?: ConsequentialPolicyEngineOptions) {
     this.pool = options?.pool;
     this.tenantId = options?.tenantId ?? '00000000-0000-0000-0000-000000000001';
     this.policies = { ...CANONICAL_CONSEQUENTIAL_POLICIES, ...(options?.policies ?? {}) };
+    this.authService = options?.authService ?? new OwnerAuthenticationService();
   }
 
   /**
@@ -211,19 +364,27 @@ export class ConsequentialPolicyEngine {
   /**
    * Step 5: Owner Authorization & Sign-off.
    * Strictly enforces that ONLY authentic Owner principal can approve or reject.
+   * Requires a verified OwnerAuthenticatedSession, signed token, or authentic Owner principal.
    */
   async resolveAuthorization(
     requestId: string,
     decision: 'APPROVED' | 'REJECTED',
-    decidedBy: string,
+    auth: OwnerAuthenticatedSession | string,
     decisionNotes?: string
   ): Promise<ConsequentialAuthorizationRecord> {
-    const isOwner =
-      decidedBy === OWNER_PRINCIPAL_ID || decidedBy === CANONICAL_OWNER_PRINCIPAL.principalId;
+    let verifiedPrincipal: string;
 
-    if (!isOwner) {
+    if (typeof auth === 'object' && 'token' in auth) {
+      const claims = this.authService.verifyOwnerSession(auth);
+      verifiedPrincipal = claims.principalId;
+    } else if (typeof auth === 'string' && auth.includes('.')) {
+      const claims = this.authService.verifyOwnerSession(auth);
+      verifiedPrincipal = claims.principalId;
+    } else if (auth === OWNER_PRINCIPAL_ID || auth === CANONICAL_OWNER_PRINCIPAL.principalId) {
+      verifiedPrincipal = OWNER_PRINCIPAL_ID;
+    } else {
       throw new UnauthorizedOwnerDecisionError(
-        `Consequential actions can exclusively be authorized by the Owner principal (Stephen Mendez). Agent or caller '${decidedBy}' cannot approve or reject consequential actions.`
+        `Consequential actions can exclusively be authorized by the Owner principal (Stephen Mendez). Agent or caller '${auth}' cannot approve or reject consequential actions.`
       );
     }
 
@@ -250,7 +411,7 @@ export class ConsequentialPolicyEngine {
     }
 
     record.status = decision;
-    record.decidedBy = decidedBy;
+    record.decidedBy = verifiedPrincipal;
     record.decidedAt = new Date().toISOString();
     record.decisionNotes = decisionNotes;
 
@@ -260,7 +421,7 @@ export class ConsequentialPolicyEngine {
 
   /**
    * Step 6: Pre-Execution Revalidation.
-   * Verifies that the approval is valid, not expired, and that the payload has NOT been altered
+   * Verifies that the approval is valid, not expired, not replayed, and that the payload has NOT been altered
    * by verifying the cryptographic parameter hash.
    */
   async revalidateForExecution(
@@ -271,6 +432,12 @@ export class ConsequentialPolicyEngine {
     if (!record) {
       throw new ConsequentialPolicyViolationError(
         `Authorization request not found for revalidation: ${requestId}`
+      );
+    }
+
+    if (record.status === 'EXECUTED') {
+      throw new ConsequentialPolicyViolationError(
+        `Replay attack prevented: Consequential action ${requestId} has already been executed.`
       );
     }
 

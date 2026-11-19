@@ -1,4 +1,5 @@
 import type { AgentKPI, DepartmentId } from '@vme/shared-types';
+import type { PerformanceEventStore } from './performance-event-store.js';
 
 export interface TaskExecutionMetric {
   agentId: string;
@@ -27,6 +28,22 @@ export class KPICalculator {
   computeAgentKPI(agentId: string, agentName: string, departmentId: DepartmentId): AgentKPI {
     const metrics = this.agentMetrics.get(agentId) ?? [];
     return this.calculateFromMetrics(agentId, agentName, departmentId, metrics);
+  }
+
+  async computeAgentKPIAsync(
+    agentId: string,
+    agentName: string,
+    departmentId: DepartmentId,
+    eventStore?: PerformanceEventStore,
+    options?: { since?: string; until?: string }
+  ): Promise<AgentKPI> {
+    if (eventStore) {
+      const events = await eventStore.getAgentEvents(agentId, options?.since, options?.until);
+      if (events.length > 0) {
+        return this.computeAgentKPIFromEvents(agentId, agentName, departmentId, events);
+      }
+    }
+    return this.computeAgentKPI(agentId, agentName, departmentId);
   }
 
   computeAgentKPIFromEvents(

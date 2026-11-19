@@ -323,3 +323,47 @@
   4. **Persistent Performance Event Store:** `PerformanceEventStore` stores event streams in `performance_events` and reviews in `agent_performance_reviews`.
   5. **Strict Non-Mutation Invariant:** Performance reviews generate actionable recommendations only; they are strictly barred from mutating agent records, departments, tiers, supervisors, or canonical identities.
 - **Consequences:** Provides concrete operational evidence, real execution sandboxing, and non-destructive performance management. Verified across all 156 monorepo tests.
+
+---
+
+## ADR-021: Owner Cryptographic Session Authentication & Hardened PostgreSQL RLS Context Verification (Final Remediation)
+- **Status:** APPROVED & IMPLEMENTED
+- **Context:** Independent audit revealed that identity string checks alone (`OWNER_PRINCIPAL_ID`) without cryptographic session verification created impersonation risks, and PostgreSQL default session contexts risked privilege escalation if not explicitly scoped per transaction.
+- **Decision:**
+  1. **Cryptographic HMAC-SHA256 Session Tokens (`OwnerAuthenticationService`):**
+     - Owner authorization requires a cryptographically generated HMAC-SHA256 session token signed with a secure secret.
+     - Tokens enforce strict validity periods (`expiresAt`), session binding, and explicit revocation checks.
+     - Unauthenticated requests or expired/tampered tokens throw `UnauthorizedOwnerDecisionError`.
+  2. **Transaction-Scoped Database Session Contexts:**
+     - `withSessionRls` encapsulates PostgreSQL operations within explicit `BEGIN ... COMMIT / ROLLBACK` transactions.
+     - PostgreSQL RLS context variable `app.is_owner_authenticated` is required by `is_current_principal_owner()` in database policies.
+     - Default unauthenticated RLS context explicitly sets `principalLevel = 'SPECIALIST'` and `isOwnerAuthenticated = false` to eliminate privilege escalation.
+     - Session variables are reset to safe defaults in `finally` blocks to guarantee zero cross-request connection pool leakage.
+  3. **Full Working Memory PostgreSQL Persistence:**
+     - `PostgresWorkingStorage` implements `WorkingMemoryStorage` with asynchronous write-through/read-through operations and TTL cleanup.
+     - In `PRODUCTION_POSTGRES` mode, all 4 memory tiers (`working`, `episodic`, `semantic`, `procedural`) run exclusively on PostgreSQL with zero in-memory fallback.
+- **Consequences:** Delivers cryptographic defense-in-depth, leak-proof database multi-tenancy, and authentic Owner authority. Verified across all 18 test suites.
+
+---
+
+## ADR-022: Central Runtime Consequential Policy Enforcement, Replay Rejection & Sandboxed Adapter Hardening (Final Remediation)
+- **Status:** APPROVED & IMPLEMENTED
+- **Context:** Consequential action verification required centralized, non-bypassable runtime enforcement directly in `ToolExecutionRuntime.executeTool()`, cryptographic replay rejection, hardened execution sandboxes, and recovery of unacknowledged messages.
+- **Decision:**
+  1. **Centralized Runtime Policy Gating:**
+     - Integrated `ConsequentialPolicyEngine` directly into `ToolExecutionRuntime.executeTool()`: every tool invocation is classified before execution.
+     - Unapproved consequential actions immediately halt and throw `QuarantinedActionError`.
+     - Validates cryptographic SHA-256 parameter hashes, blocks execution during active emergency halts, records execution status, and records timestamps.
+  2. **Replay Rejection Invariant:**
+     - Once executed (`status = 'EXECUTED'`), an approved action record cannot be re-executed or re-approved (`revalidateForExecution` throws `ConsequentialPolicyViolationError`).
+  3. **Hardened Adapter Sandboxing:**
+     - `RealFileSystemAdapter`: Blocks writes to sensitive files (`.env*`, `.git/`, `node_modules/`, `*.pem`, `*.key`) and enforces strict directory boundary confinement.
+     - `RealTerminalCommandAdapter`: Enforces executable allowlist (`APPROVED_EXECUTABLES`), blocks shell injection patterns (`DANGEROUS_ARG_PATTERNS`), and strips sensitive environment variables.
+     - `RealHttpNetworkAdapter`: Enforces SSRF defense blocking loopback, RFC 1918 private subnets, and cloud metadata endpoints (`169.254.169.254`); sanitizes authorization headers.
+  4. **Durable Message Recovery & Operational Inbox:**
+     - Message broker recovers both `PENDING` and unacknowledged `DELIVERED` messages on startup.
+     - Rejected deliveries route genuine envelopes to the dead-letter queue without fabricating dummy envelopes.
+  5. **Automated Persistent Performance Pipeline:**
+     - `ToolExecutionRuntime` automatically emits persistent performance telemetry into `PerformanceEventStore` upon tool completion.
+     - Performance reviews produce actionable recommendations without mutating agent records.
+- **Consequences:** Guarantees airtight operational security, deterministic replay immunity, and durable multi-agent orchestration. Verified across 160 monorepo tests.

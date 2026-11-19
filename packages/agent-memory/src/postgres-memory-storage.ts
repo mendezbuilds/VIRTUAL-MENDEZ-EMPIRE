@@ -19,12 +19,14 @@ import {
   assertEmbeddingCompatibility,
   IncompatibleEmbeddingError,
 } from './semantic-memory.js';
+import type { WorkingMemoryStorage } from './working-memory.js';
 
 export interface RlsSessionContext {
   tenantId: string;
   agentId?: string;
   departmentId?: string;
   principalLevel?: string;
+  isOwnerAuthenticated?: boolean;
 }
 
 export class PostgresStorageError extends Error {
@@ -35,7 +37,9 @@ export class PostgresStorageError extends Error {
 }
 
 /**
- * Executes a callback within a set PostgreSQL session RLS context on a pool client.
+ * Executes a callback within a transaction-scoped PostgreSQL session RLS context on a pool client.
+ * Uses BEGIN / COMMIT with rollback on failure, and resets session context in finally to prevent
+ * connection-pool context leakage across requests.
  */
 export async function withSessionRls<T>(
   pool: Pool,
@@ -44,23 +48,46 @@ export async function withSessionRls<T>(
 ): Promise<T> {
   const client = await pool.connect();
   try {
+    await client.query('BEGIN');
     await client.query(
       `SELECT 
         set_config('app.current_tenant_id', $1, true),
         set_config('app.current_agent_id', $2, true),
         set_config('app.current_department_id', $3, true),
-        set_config('app.current_principal_level', $4, true)`,
+        set_config('app.current_principal_level', $4, true),
+        set_config('app.is_owner_authenticated', $5, true)`,
       [
         context.tenantId,
         context.agentId ?? '',
         context.departmentId ?? '',
-        context.principalLevel ?? '',
+        context.principalLevel ?? 'SPECIALIST',
+        context.isOwnerAuthenticated === true ? 'true' : 'false',
       ]
     );
-    return await operation(client);
+    const result = await operation(client);
+    await client.query('COMMIT');
+    return result;
   } catch (err: unknown) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // ignore rollback errors if connection failed
+    }
     throw new PostgresStorageError(err instanceof Error ? err.message : String(err), err);
   } finally {
+    // Explicitly reset session-level settings to prevent connection-pool leakage
+    try {
+      await client.query(
+        `SELECT 
+          set_config('app.current_tenant_id', '', false),
+          set_config('app.current_agent_id', '', false),
+          set_config('app.current_department_id', '', false),
+          set_config('app.current_principal_level', '', false),
+          set_config('app.is_owner_authenticated', 'false', false)`
+      );
+    } catch {
+      // ignore reset error on closed client
+    }
     client.release();
   }
 }
@@ -68,46 +95,114 @@ export async function withSessionRls<T>(
 // ============================================================================
 // 1. PostgreSQL Working Memory Storage
 // ============================================================================
-export class PostgresWorkingStorage {
-  constructor(private readonly pool: Pool) {}
+export class PostgresWorkingStorage implements WorkingMemoryStorage {
+  constructor(
+    private readonly pool: Pool,
+    private readonly context?: RlsSessionContext
+  ) {}
+
+  private resolveContext(explicitContext?: RlsSessionContext): RlsSessionContext {
+    const ctx = explicitContext ?? this.context;
+    if (!ctx) {
+      throw new PostgresStorageError(
+        'RlsSessionContext is required for PostgreSQL Working Memory storage operations.'
+      );
+    }
+    return ctx;
+  }
 
   async set(
-    context: RlsSessionContext,
-    taskId: string,
-    agentId: string,
-    key: string,
-    value: unknown,
-    expiresAt: Date
+    taskIdOrContext: string | RlsSessionContext,
+    keyOrTaskId: string,
+    valueOrAgentId: unknown,
+    expiresAtOrKey?: Date | string,
+    agentIdOrValue?: string | unknown,
+    maybeExpiresAt?: Date
   ): Promise<void> {
-    await withSessionRls(this.pool, context, async (client) => {
+    let ctx: RlsSessionContext;
+    let taskId: string;
+    let agentId: string;
+    let key: string;
+    let value: unknown;
+    let expiresAt: Date;
+
+    if (typeof taskIdOrContext === 'object') {
+      ctx = taskIdOrContext;
+      taskId = keyOrTaskId;
+      agentId = valueOrAgentId as string;
+      key = expiresAtOrKey as string;
+      value = agentIdOrValue;
+      expiresAt = maybeExpiresAt ?? new Date(Date.now() + 3600 * 1000);
+    } else {
+      ctx = this.resolveContext();
+      taskId = taskIdOrContext;
+      key = keyOrTaskId;
+      value = valueOrAgentId;
+      expiresAt = (expiresAtOrKey as Date) ?? new Date(Date.now() + 3600 * 1000);
+      agentId = (agentIdOrValue as string) ?? ctx.agentId ?? '00000000-0000-0000-0000-000000000000';
+    }
+
+    await withSessionRls(this.pool, ctx, async (client) => {
       await client.query(
         `INSERT INTO agent_working_memories (id, tenant_id, task_id, agent_id, key, value, expires_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp())
          ON CONFLICT (tenant_id, task_id, key)
          DO UPDATE SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at, updated_at = clock_timestamp()`,
-        [randomUUID(), context.tenantId, taskId, agentId, key, JSON.stringify(value), expiresAt]
+        [randomUUID(), ctx.tenantId, taskId, agentId, key, JSON.stringify(value), expiresAt]
       );
     });
   }
 
-  async get<T>(context: RlsSessionContext, taskId: string, key: string): Promise<T | undefined> {
-    return withSessionRls(this.pool, context, async (client) => {
+  async get<T>(
+    contextOrTaskId: RlsSessionContext | string,
+    taskIdOrKey: string,
+    maybeKey?: string
+  ): Promise<T | undefined> {
+    let ctx: RlsSessionContext;
+    let taskId: string;
+    let key: string;
+
+    if (typeof contextOrTaskId === 'object') {
+      ctx = contextOrTaskId;
+      taskId = taskIdOrKey;
+      key = maybeKey!;
+    } else {
+      ctx = this.resolveContext();
+      taskId = contextOrTaskId;
+      key = taskIdOrKey;
+    }
+
+    return withSessionRls(this.pool, ctx, async (client) => {
       const res = await client.query(
         `SELECT value FROM agent_working_memories
          WHERE tenant_id = $1 AND task_id = $2 AND key = $3 AND expires_at > clock_timestamp()`,
-        [context.tenantId, taskId, key]
+        [ctx.tenantId, taskId, key]
       );
       if (res.rows.length === 0) return undefined;
       return res.rows[0].value as T;
     });
   }
 
-  async getAll(context: RlsSessionContext, taskId: string): Promise<Record<string, unknown>> {
-    return withSessionRls(this.pool, context, async (client) => {
+  async getAll(
+    contextOrTaskId: RlsSessionContext | string,
+    maybeTaskId?: string
+  ): Promise<Record<string, unknown>> {
+    let ctx: RlsSessionContext;
+    let taskId: string;
+
+    if (typeof contextOrTaskId === 'object') {
+      ctx = contextOrTaskId;
+      taskId = maybeTaskId!;
+    } else {
+      ctx = this.resolveContext();
+      taskId = contextOrTaskId;
+    }
+
+    return withSessionRls(this.pool, ctx, async (client) => {
       const res = await client.query(
         `SELECT key, value FROM agent_working_memories
          WHERE tenant_id = $1 AND task_id = $2 AND expires_at > clock_timestamp()`,
-        [context.tenantId, taskId]
+        [ctx.tenantId, taskId]
       );
       const result: Record<string, unknown> = {};
       for (const row of res.rows) {
@@ -117,20 +212,32 @@ export class PostgresWorkingStorage {
     });
   }
 
-  async clear(context: RlsSessionContext, taskId: string): Promise<void> {
-    await withSessionRls(this.pool, context, async (client) => {
+  async clear(contextOrTaskId: RlsSessionContext | string, maybeTaskId?: string): Promise<void> {
+    let ctx: RlsSessionContext;
+    let taskId: string;
+
+    if (typeof contextOrTaskId === 'object') {
+      ctx = contextOrTaskId;
+      taskId = maybeTaskId!;
+    } else {
+      ctx = this.resolveContext();
+      taskId = contextOrTaskId;
+    }
+
+    await withSessionRls(this.pool, ctx, async (client) => {
       await client.query(
         `DELETE FROM agent_working_memories WHERE tenant_id = $1 AND task_id = $2`,
-        [context.tenantId, taskId]
+        [ctx.tenantId, taskId]
       );
     });
   }
 
-  async cleanupExpired(context: RlsSessionContext): Promise<number> {
-    return withSessionRls(this.pool, context, async (client) => {
+  async cleanupExpired(context?: RlsSessionContext): Promise<number> {
+    const ctx = this.resolveContext(context);
+    return withSessionRls(this.pool, ctx, async (client) => {
       const res = await client.query(
         `DELETE FROM agent_working_memories WHERE tenant_id = $1 AND expires_at <= clock_timestamp()`,
-        [context.tenantId]
+        [ctx.tenantId]
       );
       return res.rowCount ?? 0;
     });
@@ -250,6 +357,8 @@ export class PostgresEpisodicStorage implements EpisodicMemoryStorage {
   private mapRowToRecord(row: any): EpisodicMemoryRecord {
     return EpisodicMemoryRecordSchema.parse({
       ...row,
+      lessonsLearned: row.lessonsLearned ?? undefined,
+      executionDurationMs: row.executionDurationMs != null ? Number(row.executionDurationMs) : undefined,
       recordedAt: row.recordedAt instanceof Date ? row.recordedAt.toISOString() : String(row.recordedAt),
       metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata ?? {}),
     });

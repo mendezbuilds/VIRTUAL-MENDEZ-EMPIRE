@@ -32,6 +32,7 @@ import {
   type ProceduralPromotionRequest,
 } from './consolidation-pipeline.js';
 import {
+  PostgresWorkingStorage,
   PostgresEpisodicStorage,
   PostgresSemanticStorage,
   PostgresProceduralStorage,
@@ -80,12 +81,21 @@ export class AgentMemoryEngine {
       }
       const pool = options.pool;
       const tenantId = options.defaultTenantId ?? '00000000-0000-0000-0000-000000000001';
-      const rlsContext: RlsSessionContext = { tenantId, principalLevel: 'OWNER' };
+      // Secure least-privilege default RlsSessionContext for standard agent operations (never defaults to OWNER)
+      const rlsContext: RlsSessionContext = {
+        tenantId,
+        principalLevel: 'SPECIALIST',
+        isOwnerAuthenticated: false,
+      };
 
-      this.working = options.workingMemory ?? new WorkingMemory();
-      this.episodic = new EpisodicMemory(new PostgresEpisodicStorage(pool, rlsContext));
-      this.semantic = new SemanticMemory(new PostgresSemanticStorage(pool, rlsContext));
-      this.procedural = new ProceduralMemory(new PostgresProceduralStorage(pool, rlsContext));
+      const workingStorage = new PostgresWorkingStorage(pool, rlsContext);
+      this.working = options.workingMemory ?? new WorkingMemory({ storage: workingStorage });
+      this.episodic =
+        options.episodicMemory ?? new EpisodicMemory(new PostgresEpisodicStorage(pool, rlsContext));
+      this.semantic =
+        options.semanticMemory ?? new SemanticMemory(new PostgresSemanticStorage(pool, rlsContext));
+      this.procedural =
+        options.proceduralMemory ?? new ProceduralMemory(new PostgresProceduralStorage(pool, rlsContext));
     } else {
       // Explicit test double mode
       this.working = options?.workingMemory ?? new WorkingMemory();

@@ -34,9 +34,13 @@ export class DelegationManager {
   constructor(
     private readonly hierarchy: DepartmentRegistry,
     private readonly router: MessageRouter,
-    policyEngine?: ConsequentialPolicyEngine
+    policyEngineOrOptions?: ConsequentialPolicyEngine | { policyEngine?: ConsequentialPolicyEngine }
   ) {
-    this.policyEngine = policyEngine;
+    if (policyEngineOrOptions && 'quarantineAction' in policyEngineOrOptions) {
+      this.policyEngine = policyEngineOrOptions as ConsequentialPolicyEngine;
+    } else if (policyEngineOrOptions && typeof policyEngineOrOptions === 'object' && 'policyEngine' in policyEngineOrOptions) {
+      this.policyEngine = (policyEngineOrOptions as { policyEngine?: ConsequentialPolicyEngine }).policyEngine;
+    }
   }
 
   /**

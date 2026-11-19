@@ -75,6 +75,11 @@ export class PerformanceReviewEngine {
       overallRating = 'EXCEEDS_EXPECTATIONS';
       strengths.push('High execution reliability and consistency');
       strengths.push('Optimal token consumption and cost efficiency');
+      recommendations.push({
+        type: 'TOOL_TRAINING',
+        description: 'Explore advanced capability authorization and procedural pattern consolidation.',
+        suggestedPriority: 'LOW',
+      });
     } else if (kpi.performanceScore >= 70) {
       overallRating = 'MEETS_EXPECTATIONS';
       strengths.push('Solid task completion rates');
@@ -177,6 +182,11 @@ export class PerformanceReviewEngine {
       overallRating = 'EXCEEDS_EXPECTATIONS';
       strengths.push('High execution reliability and consistency');
       strengths.push('Optimal token consumption and cost efficiency');
+      recommendations.push({
+        type: 'TOOL_TRAINING',
+        description: 'Explore advanced capability authorization and procedural pattern consolidation.',
+        suggestedPriority: 'LOW',
+      });
     } else if (kpi.performanceScore >= 70) {
       overallRating = 'MEETS_EXPECTATIONS';
       strengths.push('Solid task completion rates');

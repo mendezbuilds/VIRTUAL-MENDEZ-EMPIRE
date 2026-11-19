@@ -211,6 +211,87 @@ export class PostgresMessageStorage {
     }
   }
 
+  async getEnvelopeById(messageId: string): Promise<AgentMessageEnvelope | undefined> {
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query(
+        `SELECT message_id as "messageId", sender_agent_id as "senderAgentId", sender_agent_code as "senderAgentCode",
+                sender_department_id as "senderDepartmentId", recipient_agent_id as "recipientAgentId",
+                recipient_agent_code as "recipientAgentCode", recipient_department_id as "recipientDepartmentId",
+                type, priority, task_id as "taskId", payload, correlation_id as "correlationId",
+                causation_id as "causationId", sent_at as "sentAt", expires_at as "expiresAt",
+                delivery_status as "deliveryStatus", requires_response as "requiresResponse"
+         FROM agent_communication_envelopes
+         WHERE message_id = $1 AND tenant_id = $2`,
+        [messageId, this.context.tenantId]
+      );
+      if (res.rows.length === 0) return undefined;
+      return this.mapRowToEnvelope(res.rows[0]);
+    } catch (err: unknown) {
+      throw new PostgresMessageStorageError(
+        `Failed to get envelope ${messageId}: ${err instanceof Error ? err.message : String(err)}`,
+        err
+      );
+    } finally {
+      client.release();
+    }
+  }
+
+  async getDeadLetters(): Promise<any[]> {
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query(
+        `SELECT id, message_id as "messageId", sender_agent_id as "senderAgentId",
+                recipient_agent_id as "recipientAgentId", type, payload,
+                failure_reason as "failureReason", retry_attempts as "retryAttempts",
+                failed_at as "failedAt"
+         FROM message_dead_letter_queue
+         WHERE tenant_id = $1
+         ORDER BY failed_at DESC`,
+        [this.context.tenantId]
+      );
+      return res.rows;
+    } catch (err: unknown) {
+      throw new PostgresMessageStorageError(
+        `Failed to get dead letters: ${err instanceof Error ? err.message : String(err)}`,
+        err
+      );
+    } finally {
+      client.release();
+    }
+  }
+
+  async getAcknowledgment(messageId: string): Promise<MessageAcknowledgment | undefined> {
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query(
+        `SELECT acknowledgment_id as "acknowledgmentId", message_id as "messageId",
+                recipient_agent_id as "recipientAgentId", status, rejection_reason as "rejectionReason",
+                received_at as "receivedAt"
+         FROM message_delivery_acknowledgments
+         WHERE message_id = $1`,
+        [messageId]
+      );
+      if (res.rows.length === 0) return undefined;
+      const r = res.rows[0];
+      return {
+        acknowledgmentId: r.acknowledgmentId,
+        messageId: r.messageId,
+        recipientAgentId: r.recipientAgentId,
+        status: r.status,
+        rejectionReason: r.rejectionReason ?? undefined,
+        receivedAt: r.receivedAt instanceof Date ? r.receivedAt.toISOString() : String(r.receivedAt),
+      };
+    } catch (err: unknown) {
+      throw new PostgresMessageStorageError(
+        `Failed to get acknowledgment for ${messageId}: ${err instanceof Error ? err.message : String(err)}`,
+        err
+      );
+    } finally {
+      client.release();
+    }
+  }
+
   async recoverPendingMessages(): Promise<AgentMessageEnvelope[]> {
     const client = await this.pool.connect();
     try {
@@ -222,7 +303,11 @@ export class PostgresMessageStorage {
                 causation_id as "causationId", sent_at as "sentAt", expires_at as "expiresAt",
                 delivery_status as "deliveryStatus", requires_response as "requiresResponse"
          FROM agent_communication_envelopes
-         WHERE tenant_id = $1 AND delivery_status = 'PENDING'
+         WHERE tenant_id = $1 
+           AND (
+             delivery_status = 'PENDING'
+             OR (delivery_status = 'DELIVERED' AND acknowledged_at IS NULL)
+           )
            AND (expires_at IS NULL OR expires_at > clock_timestamp())
            AND (next_retry_at IS NULL OR next_retry_at <= clock_timestamp())
          ORDER BY sent_at ASC`,

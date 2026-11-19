@@ -37,8 +37,9 @@ $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, public
 
 CREATE OR REPLACE FUNCTION is_current_principal_owner() RETURNS BOOLEAN AS $$
 BEGIN
-  RETURN get_current_principal_level() = 'OWNER' 
-      OR get_current_agent_id() = '00000000-0000-0000-0000-000000000000'::UUID;
+  RETURN (current_setting('app.is_owner_authenticated', true) = 'true')
+     AND (get_current_principal_level() = 'OWNER' 
+          OR get_current_agent_id() = '00000000-0000-0000-0000-000000000000'::UUID);
 END;
 $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, public;
 

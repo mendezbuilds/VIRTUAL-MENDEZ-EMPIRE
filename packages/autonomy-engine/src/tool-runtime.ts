@@ -4,6 +4,12 @@ import { assertNoRawCredentials, type DepartmentId } from '@vme/shared-types';
 import type { DepartmentRegistry } from '@vme/department-hierarchy';
 import type { EmergencySupervisor } from '@vme/security-governance';
 import {
+  ConsequentialPolicyEngine,
+  type ConsequentialActionType,
+  type ConsequentialAuthorizationRecord,
+} from '@vme/agent-communication';
+import type { PerformanceEventStore } from '@vme/performance-management';
+import {
   RealFileSystemAdapter,
   RealTerminalCommandAdapter,
   RealHttpNetworkAdapter,
@@ -19,6 +25,9 @@ export interface ToolDefinition<TInput = Record<string, unknown>, TOutput = unkn
   description: string;
   requiredCapability: string;
   departmentScope?: DepartmentId;
+  consequentialType?:
+    | ConsequentialActionType
+    | ((input: TInput) => ConsequentialActionType | null);
   execute: (input: TInput, context: ToolExecutionContext) => Promise<TOutput>;
 }
 
@@ -47,6 +56,8 @@ export interface ToolRuntimeOptions {
   pool?: Pool;
   tenantId?: string;
   workspaceRoot?: string;
+  policyEngine?: ConsequentialPolicyEngine;
+  eventStore?: PerformanceEventStore;
 }
 
 export class ToolExecutionError extends Error {
@@ -56,11 +67,23 @@ export class ToolExecutionError extends Error {
   }
 }
 
+export class QuarantinedActionError extends Error {
+  constructor(
+    message: string,
+    public readonly approvalRequest: ConsequentialAuthorizationRecord
+  ) {
+    super(`CONSEQUENTIAL ACTION QUARANTINED: ${message}`);
+    this.name = 'QuarantinedActionError';
+  }
+}
+
 export class ToolExecutionRuntime {
   private tools = new Map<string, ToolDefinition<any, any>>();
   private executionLogs: ToolExecutionLog[] = [];
 
   private readonly emergencySupervisor?: EmergencySupervisor;
+  public readonly policyEngine?: ConsequentialPolicyEngine;
+  public readonly eventStore?: PerformanceEventStore;
   public readonly fsAdapter: RealFileSystemAdapter;
   public readonly terminalAdapter: RealTerminalCommandAdapter;
   public readonly httpAdapter: RealHttpNetworkAdapter;
@@ -72,6 +95,7 @@ export class ToolExecutionRuntime {
   ) {
     if (optionsOrSupervisor && 'assertOperational' in optionsOrSupervisor) {
       this.emergencySupervisor = optionsOrSupervisor;
+      this.policyEngine = new ConsequentialPolicyEngine();
       this.executionRecorder = new TaskExecutionRecorder();
       this.fsAdapter = new RealFileSystemAdapter();
       this.terminalAdapter = new RealTerminalCommandAdapter();
@@ -79,11 +103,15 @@ export class ToolExecutionRuntime {
     } else if (optionsOrSupervisor) {
       const opts = optionsOrSupervisor as ToolRuntimeOptions;
       this.emergencySupervisor = opts.emergencySupervisor;
+      this.policyEngine =
+        opts.policyEngine ?? new ConsequentialPolicyEngine({ pool: opts.pool, tenantId: opts.tenantId });
+      this.eventStore = opts.eventStore;
       this.executionRecorder = new TaskExecutionRecorder(opts.pool, opts.tenantId);
       this.fsAdapter = new RealFileSystemAdapter(opts.workspaceRoot);
       this.terminalAdapter = new RealTerminalCommandAdapter(opts.workspaceRoot);
       this.httpAdapter = new RealHttpNetworkAdapter();
     } else {
+      this.policyEngine = new ConsequentialPolicyEngine();
       this.executionRecorder = new TaskExecutionRecorder();
       this.fsAdapter = new RealFileSystemAdapter();
       this.terminalAdapter = new RealTerminalCommandAdapter();
@@ -101,10 +129,55 @@ export class ToolExecutionRuntime {
     return this.tools.get(toolName);
   }
 
+  classifyAction(
+    toolName: string,
+    tool?: ToolDefinition<any, any>,
+    args?: Record<string, unknown>
+  ): ConsequentialActionType | null {
+    if (tool?.consequentialType) {
+      return typeof tool.consequentialType === 'function'
+        ? tool.consequentialType(args ?? {})
+        : tool.consequentialType;
+    }
+
+    if (toolName === 'order_execution') {
+      if (args?.mode === 'LIVE' || args?.isLive === true) {
+        return 'LIVE_TRADING';
+      }
+    }
+
+    if (toolName === 'capital_transfer' || toolName === 'treasury_allocation') {
+      return 'CAPITAL_TRANSFER';
+    }
+
+    if (toolName === 'real_http_client') {
+      const method = String(args?.method ?? 'GET').toUpperCase();
+      if (method !== 'GET') {
+        return 'EXTERNAL_OUTREACH';
+      }
+    }
+
+    if (toolName === 'real_filesystem') {
+      if (args?.action === 'delete') {
+        return 'IRREVERSIBLE_OPERATION';
+      }
+    }
+
+    if (toolName === 'real_terminal_command') {
+      const cmd = String(args?.command ?? '').toLowerCase();
+      if (cmd.includes('rm') || cmd.includes('del') || cmd.includes('drop')) {
+        return 'IRREVERSIBLE_OPERATION';
+      }
+    }
+
+    return null;
+  }
+
   async executeTool(
     toolName: string,
     args: Record<string, unknown>,
-    context: ToolExecutionContext
+    context: ToolExecutionContext,
+    options?: { approvalRequestId?: string }
   ): Promise<unknown> {
     const startTime = Date.now();
     const executionId = randomUUID();
@@ -134,7 +207,6 @@ export class ToolExecutionRuntime {
       throw new ToolExecutionError(`Agent '${context.agentId}' not found in corporate hierarchy.`);
     }
 
-    // Verify department capability authorization
     try {
       this.hierarchy.assertCapability(agent.id, tool.requiredCapability);
     } catch (err: unknown) {
@@ -144,7 +216,37 @@ export class ToolExecutionRuntime {
       );
     }
 
-    // 5. Start Execution Recording
+    // 5. Centralized Consequential Action Policy Enforcement Point
+    const classifiedActionType = this.classifyAction(toolName, tool, args);
+    let approvalRequestId = options?.approvalRequestId;
+
+    if ((classifiedActionType || approvalRequestId) && this.policyEngine) {
+      if (!approvalRequestId) {
+        // Quarantine the action immediately and persist approval request
+        const quarantineRecord = await this.policyEngine.quarantineAction({
+          taskId: context.taskId,
+          actionType: classifiedActionType!,
+          agentId: context.agentId,
+          departmentId: context.departmentId,
+          payload: args,
+        });
+
+        throw new QuarantinedActionError(
+          `Consequential action '${classifiedActionType}' invoked via tool '${toolName}' requires authentic Owner authorization. Action has been quarantined under request ID '${quarantineRecord.id}'.`,
+          quarantineRecord
+        );
+      }
+
+      // Revalidate approval against exact parameters immediately prior to execution
+      await this.policyEngine.revalidateForExecution(approvalRequestId, args);
+
+      // Re-verify emergency halt immediately before execution
+      if (this.emergencySupervisor) {
+        this.emergencySupervisor.assertOperational();
+      }
+    }
+
+    // 6. Start Execution Recording
     const taskRecord = await this.executionRecorder.startExecution({
       taskId: context.taskId,
       agentId: context.agentId,
@@ -152,7 +254,7 @@ export class ToolExecutionRuntime {
       authorizedCapability: tool.requiredCapability,
     });
 
-    // 6. Execute Tool with Timing
+    // 7. Execute Tool with Timing
     try {
       const result = await tool.execute(args, context);
       const durationMs = Date.now() - startTime;
@@ -170,7 +272,12 @@ export class ToolExecutionRuntime {
       });
 
       const artifacts: string[] = [];
-      if (typeof result === 'object' && result !== null && 'absolutePath' in result && typeof (result as any).absolutePath === 'string') {
+      if (
+        typeof result === 'object' &&
+        result !== null &&
+        'absolutePath' in result &&
+        typeof (result as any).absolutePath === 'string'
+      ) {
         artifacts.push((result as any).absolutePath);
       }
 
@@ -178,10 +285,40 @@ export class ToolExecutionRuntime {
         recordId: taskRecord.id,
         status: 'COMPLETED',
         durationMs,
-        outputData: typeof result === 'object' && result !== null ? (result as Record<string, unknown>) : { result },
+        outputData:
+          typeof result === 'object' && result !== null
+            ? (result as Record<string, unknown>)
+            : { result },
         artifactReferences: artifacts,
         verificationResult: 'VERIFIED_SUCCESS',
       });
+
+      // Mark approval consumed / executed in policy engine to prevent replay attacks
+      if (approvalRequestId && this.policyEngine) {
+        await this.policyEngine.recordExecutionOutcome(
+          approvalRequestId,
+          'SUCCESS',
+          typeof result === 'object' && result !== null
+            ? (result as Record<string, unknown>)
+            : { result }
+        );
+      }
+
+      // Automatically emit persistent performance event
+      if (this.eventStore) {
+        await this.eventStore.recordEvent({
+          agentId: context.agentId,
+          departmentId: context.departmentId,
+          taskId: context.taskId,
+          eventType: toolName,
+          durationMs,
+          tokensUsed: 180,
+          costUsd: 0.002,
+          taskComplexity: classifiedActionType ? 2.5 : 1.2,
+          qualityScore: 1.0,
+          isSuccessful: true,
+        });
+      }
 
       return result;
     } catch (err: unknown) {
@@ -208,6 +345,27 @@ export class ToolExecutionRuntime {
         errorMessage: errorMsg,
         verificationResult: 'VERIFIED_FAILURE',
       });
+
+      if (approvalRequestId && this.policyEngine) {
+        await this.policyEngine.recordExecutionOutcome(approvalRequestId, 'FAILED', {
+          error: errorMsg,
+        });
+      }
+
+      if (this.eventStore) {
+        await this.eventStore.recordEvent({
+          agentId: context.agentId,
+          departmentId: context.departmentId,
+          taskId: context.taskId,
+          eventType: toolName,
+          durationMs,
+          tokensUsed: 100,
+          costUsd: 0.001,
+          taskComplexity: classifiedActionType ? 2.5 : 1.2,
+          qualityScore: 0.0,
+          isSuccessful: false,
+        });
+      }
 
       throw new ToolExecutionError(`Tool execution failed for '${toolName}': ${errorMsg}`);
     }

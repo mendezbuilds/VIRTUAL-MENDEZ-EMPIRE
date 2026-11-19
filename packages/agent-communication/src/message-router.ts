@@ -276,25 +276,21 @@ export class MessageRouter {
     if (this.postgresStorage) {
       this.postgresStorage.recordAcknowledgment(ack).catch(() => {});
       if (status === 'REJECTED') {
-        const dummyEnvelope = (this.deadLetterQueue.find((m) => m.messageId === messageId) ?? {
-          messageId,
-          senderAgentId: '00000000-0000-0000-0000-000000000000',
-          senderAgentCode: 'UNKNOWN',
-          senderDepartmentId: 'executive_office',
-          recipientAgentId,
-          recipientAgentCode: 'UNKNOWN',
-          recipientDepartmentId: 'executive_office',
-          type: 'INFORMATION_RESPONSE',
-          priority: 'MEDIUM',
-          payload: {},
-          correlationId: randomUUID(),
-          deliveryStatus: 'FAILED',
-          requiresResponse: false,
-          sentAt: new Date().toISOString(),
-        }) as AgentMessageEnvelope;
-        this.postgresStorage
-          .routeToDeadLetter(dummyEnvelope, rejectionReason ?? 'Message rejected by recipient', 0)
-          .catch(() => {});
+        const existingEnvelope =
+          this.deadLetterQueue.find((m) => m.messageId === messageId) ??
+          Array.from(this.inboxes.values()).flat().find((m) => m.messageId === messageId);
+
+        if (existingEnvelope) {
+          this.postgresStorage
+            .routeToDeadLetter(existingEnvelope, rejectionReason ?? 'Message rejected by recipient', 0)
+            .catch(() => {});
+        } else {
+          this.postgresStorage.getEnvelopeById(messageId).then((env) => {
+            if (env) {
+              this.postgresStorage?.routeToDeadLetter(env, rejectionReason ?? 'Message rejected by recipient', 0).catch(() => {});
+            }
+          }).catch(() => {});
+        }
       }
     }
 
@@ -360,16 +356,65 @@ export class MessageRouter {
     return this.inboxes.get(agentId) ?? [];
   }
 
+  async getInboxAsync(agentId: string): Promise<AgentMessageEnvelope[]> {
+    if (this.postgresStorage) {
+      const messages = await this.postgresStorage.getInbox(agentId);
+      this.inboxes.set(agentId, messages);
+      for (const m of messages) {
+        if (m.deliveryStatus) {
+          this.messageStatuses.set(m.messageId, m.deliveryStatus);
+        }
+      }
+      return messages;
+    }
+    return this.getInbox(agentId);
+  }
+
   getMessageStatus(messageId: string): DeliveryStatus | undefined {
     return this.messageStatuses.get(messageId);
+  }
+
+  async getMessageStatusAsync(messageId: string): Promise<DeliveryStatus | undefined> {
+    const cached = this.getMessageStatus(messageId);
+    if (cached) return cached;
+    if (this.postgresStorage) {
+      const env = await this.postgresStorage.getEnvelopeById(messageId);
+      if (env) {
+        if (env.deliveryStatus) {
+          this.messageStatuses.set(messageId, env.deliveryStatus);
+        }
+        return env.deliveryStatus;
+      }
+    }
+    return undefined;
   }
 
   getAcknowledgment(messageId: string): MessageAcknowledgment | undefined {
     return this.acknowledgedMessages.get(messageId);
   }
 
+  async getAcknowledgmentAsync(messageId: string): Promise<MessageAcknowledgment | undefined> {
+    const cached = this.getAcknowledgment(messageId);
+    if (cached) return cached;
+    if (this.postgresStorage) {
+      const ack = await this.postgresStorage.getAcknowledgment(messageId);
+      if (ack) {
+        this.acknowledgedMessages.set(messageId, ack);
+        return ack;
+      }
+    }
+    return undefined;
+  }
+
   getDeadLetterQueue(): AgentMessageEnvelope[] {
     return [...this.deadLetterQueue];
+  }
+
+  async getDeadLetterQueueAsync(): Promise<any[]> {
+    if (this.postgresStorage) {
+      return await this.postgresStorage.getDeadLetters();
+    }
+    return this.getDeadLetterQueue();
   }
 
   retryDeadLetter(messageId: string): Promise<AgentMessageEnvelope | undefined> {

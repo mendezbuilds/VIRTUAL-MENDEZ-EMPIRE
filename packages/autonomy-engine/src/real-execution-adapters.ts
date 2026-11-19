@@ -34,23 +34,47 @@ export interface FileSystemToolOutput {
 
 /**
  * Sandboxed real filesystem adapter. Confines all file operations within workspaceRoot.
+ * Enforces path traversal protection and blocks writes to critical repository files.
  */
 export class RealFileSystemAdapter {
+  private static readonly BLOCKED_WRITE_PATTERNS = [
+    /^\.env/i,
+    /^\.git[\/\\]/i,
+    /^\.pnpm-store[\/\\]/i,
+    /^node_modules[\/\\]/i,
+    /\.(pem|key|cert|id_rsa)$/i,
+  ];
+
   constructor(private readonly workspaceRoot: string = process.cwd()) {}
 
-  private resolveSandboxedPath(relativePath: string): string {
+  private resolveSandboxedPath(relativePath: string, isWrite: boolean = false): string {
+    const normalizedRelative = path.normalize(relativePath).replace(/^(\.\.[\/\\])+/, '');
     const resolved = path.resolve(this.workspaceRoot, relativePath);
     const normalizedRoot = path.resolve(this.workspaceRoot);
+
     if (!resolved.startsWith(normalizedRoot)) {
       throw new ExecutionSandboxError(
         `Path traversal attempt outside workspace sandbox: '${relativePath}' -> '${resolved}'`
       );
     }
+
+    if (isWrite) {
+      const relFromRoot = path.relative(normalizedRoot, resolved);
+      for (const pattern of RealFileSystemAdapter.BLOCKED_WRITE_PATTERNS) {
+        if (pattern.test(relFromRoot)) {
+          throw new ExecutionSandboxError(
+            `Permission denied: writing to protected path '${relFromRoot}' is prohibited by corporate governance policy.`
+          );
+        }
+      }
+    }
+
     return resolved;
   }
 
   async execute(input: FileSystemToolInput): Promise<FileSystemToolOutput> {
-    const targetPath = this.resolveSandboxedPath(input.relativePath);
+    const isWrite = input.action === 'write';
+    const targetPath = this.resolveSandboxedPath(input.relativePath, isWrite);
 
     switch (input.action) {
       case 'read': {
@@ -142,10 +166,35 @@ export interface TerminalCommandOutput {
 }
 
 /**
- * Sandboxed real terminal execution adapter. Executes processes with timeout controls and sandboxing.
+ * Sandboxed real terminal execution adapter. Executes processes with executable allowlists,
+ * shell chaining prevention, environment variable sanitization, and timeout controls.
  */
 export class RealTerminalCommandAdapter {
-  constructor(private readonly workspaceRoot: string = process.cwd()) {}
+  private static readonly APPROVED_EXECUTABLES = new Set([
+    'node',
+    'git',
+    'npm',
+    'pnpm',
+    'echo',
+    'cat',
+    'ls',
+    'dir',
+    'python',
+    'python3',
+    'tsc',
+    'vitest',
+  ]);
+
+  private static readonly DANGEROUS_ARG_PATTERNS = [
+    /^(&&|\|\||;|\|)$/,
+    /`[^`]+`/,
+    /\$\([^\)]+\)/,
+  ];
+
+  constructor(
+    private readonly workspaceRoot: string = process.cwd(),
+    private readonly allowedExecutables: Set<string> = RealTerminalCommandAdapter.APPROVED_EXECUTABLES
+  ) {}
 
   async execute(input: TerminalCommandInput): Promise<TerminalCommandOutput> {
     const startTime = Date.now();
@@ -160,16 +209,47 @@ export class RealTerminalCommandAdapter {
       );
     }
 
+    // 1. Executable allowlist check
+    const baseCmd = path.basename(input.command).replace(/\.(exe|cmd|bat|sh)$/i, '').toLowerCase();
+    if (!this.allowedExecutables.has(baseCmd) && !this.allowedExecutables.has(input.command)) {
+      throw new ExecutionSandboxError(
+        `Command '${input.command}' is not in the approved executable allowlist.`
+      );
+    }
+
+    // 2. Argument safety check (prevent shell injection)
+    const args = input.args ?? [];
+    for (const arg of args) {
+      for (const pattern of RealTerminalCommandAdapter.DANGEROUS_ARG_PATTERNS) {
+        if (pattern.test(arg)) {
+          throw new ExecutionSandboxError(
+            `Argument '${arg}' contains prohibited shell chaining or interpolation operators.`
+          );
+        }
+      }
+    }
+
+    // 3. Environment sanitization (strip credentials/secrets)
+    const sanitizedEnv: NodeJS.ProcessEnv = { ...process.env };
+    for (const key of Object.keys(sanitizedEnv)) {
+      if (
+        /^(AWS_|GITHUB_|DATABASE_URL|.*_SECRET|.*_KEY|.*_PASSWORD|AUTH_|TOKEN)/i.test(key)
+      ) {
+        delete sanitizedEnv[key];
+      }
+    }
+
     try {
-      const { stdout, stderr } = await execFileAsync(input.command, input.args ?? [], {
+      const { stdout, stderr } = await execFileAsync(input.command, args, {
         cwd: workingDir,
         timeout,
         maxBuffer: 10 * 1024 * 1024,
+        env: sanitizedEnv,
       });
 
       return {
         command: input.command,
-        args: input.args ?? [],
+        args,
         exitCode: 0,
         stdout: String(stdout),
         stderr: String(stderr),
@@ -179,7 +259,7 @@ export class RealTerminalCommandAdapter {
     } catch (err: any) {
       return {
         command: input.command,
-        args: input.args ?? [],
+        args,
         exitCode: err.code ?? (typeof err.status === 'number' ? err.status : 1),
         stdout: err.stdout ? String(err.stdout) : '',
         stderr: err.stderr ? String(err.stderr) : err.message,
@@ -210,13 +290,50 @@ export interface HttpNetworkOutput {
 }
 
 /**
- * Real HTTP network execution adapter.
+ * Real HTTP network execution adapter with SSRF protection, credential redaction,
+ * and response size limit controls.
  */
 export class RealHttpNetworkAdapter {
+  private static readonly BLOCKED_HOSTNAMES = new Set([
+    'localhost',
+    '127.0.0.1',
+    '0.0.0.0',
+    '169.254.169.254', // AWS/cloud metadata
+    '[::1]',
+    'metadata.google.internal',
+  ]);
+
   async execute(input: HttpNetworkInput): Promise<HttpNetworkOutput> {
     const startTime = Date.now();
     const timeout = input.timeoutMs ?? 5000;
     const method = input.method ?? 'GET';
+
+    // 1. SSRF Protection & URL Validation
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(input.url);
+    } catch {
+      throw new ExecutionSandboxError(`Malformed target URL: '${input.url}'`);
+    }
+
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      throw new ExecutionSandboxError(
+        `Prohibited network protocol '${parsedUrl.protocol}'. Only HTTP and HTTPS are permitted.`
+      );
+    }
+
+    const hostname = parsedUrl.hostname.toLowerCase();
+    if (
+      RealHttpNetworkAdapter.BLOCKED_HOSTNAMES.has(hostname) ||
+      hostname.startsWith('127.') ||
+      hostname.startsWith('10.') ||
+      hostname.startsWith('192.168.') ||
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname)
+    ) {
+      throw new ExecutionSandboxError(
+        `SSRF Protection Violation: Requests to private, local, or cloud metadata network addresses ('${hostname}') are strictly blocked.`
+      );
+    }
 
     const reqHeaders: Record<string, string> = {
       'User-Agent': 'VirtualMendezEmpire-Worker/2.0',
@@ -242,7 +359,12 @@ export class RealHttpNetworkAdapter {
     const durationMs = Date.now() - startTime;
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((value, key) => {
-      responseHeaders[key] = value;
+      // Redact sensitive headers
+      if (/^(authorization|cookie|set-cookie|x-api-key)/i.test(key)) {
+        responseHeaders[key] = '[REDACTED]';
+      } else {
+        responseHeaders[key] = value;
+      }
     });
 
     let data: unknown;

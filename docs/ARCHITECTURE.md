@@ -221,9 +221,15 @@ flowchart TD
   - Downward task assignments/delegations verified via `hierarchy.validateDelegation()`.
   - Upward escalations cannot flow downward from Executive to Specialist.
   - Cross-department lateral communications between non-director specialists are restricted and require Director gating or Executive coordination.
-- **Consequential Action Interception (`DelegationManager`):**
-  - Gating and quarantining of actions touching `LIVE_TRADING`, `CAPITAL_TRANSFER`, `EXTERNAL_OUTREACH`, and `BINDING_CONTRACT`.
-  - Enforces that only the authentic Owner principal (`OWNER_PRINCIPAL_ID`) can authorize consequential actions; AI agents attempting to self-authorize throw `UnauthorizedOwnerDecisionError`.
+- **Durable Message Lifecycle & Worker Recovery:**
+  - Full message state machine: `PENDING` -> `DELIVERED` -> `ACKNOWLEDGED`.
+  - Unacknowledged and pending messages survive process restarts and are re-enqueued for delivery.
+  - Authentic dead-letter queue routing without fabricated envelopes.
+- **Cryptographic Owner Authentication & Consequential Action Interception:**
+  - `OwnerAuthenticationService`: Generates and cryptographically verifies HMAC-SHA256 authenticated session tokens with strict TTL and explicit revocation.
+  - Action types requiring Owner authorization expanded: `LIVE_TRADING`, `CAPITAL_TRANSFER`, `EXTERNAL_OUTREACH`, `BINDING_CONTRACT`, `CREDENTIAL_ACCESS`, `ACCOUNT_PERMISSION_CHANGE`, `IRREVERSIBLE_OPERATION`, `GOVERNANCE_OVERRIDE`, `INFRASTRUCTURE_MUTATION`.
+  - Replay prevention: Executed consequential actions cannot be re-executed or re-approved.
+  - Enforces that only the authentic Owner principal (`OWNER_PRINCIPAL_ID`) with a valid cryptographic session token can authorize consequential actions; AI agents attempting to self-authorize throw `UnauthorizedOwnerDecisionError`.
 - **Episodic Memory & Emergency Halt Integration:** Logs message dispatches to episodic memory and freezes routing during emergency halts.
 
 ---
@@ -239,12 +245,16 @@ flowchart TD
   - Persona representing `EXEC-CEO` (`CEO_AutonomousDirector`).
   - Ingests Owner strategic directives (validating `OWNER_PRINCIPAL_ID`).
   - Dispatches initiatives to Department Directors and compiles Executive Board Reports for the Owner.
-- **Genuine Execution Adapters & Verifiable Runtime (`ToolExecutionRuntime`):**
-  - Real execution adapters: `RealFileSystemAdapter` (sandboxed file reads, writes, stats, directory listing), `RealTerminalCommandAdapter` (sandboxed subprocess execution with timeout and exit codes), and `RealHttpNetworkAdapter` (genuine HTTP/HTTPS requests).
+- **Central Consequential Enforcement & Genuine Execution Adapters (`ToolExecutionRuntime`):**
+  - Direct policy gating inside `executeTool()`: intercepts every tool invocation, classifies action consequentially, halts and quarantines unapproved actions with `QuarantinedActionError`.
+  - Validates cryptographic parameter hashes, prevents execution replay, verifies active emergency supervisor state, and updates approval execution outcomes.
+  - Hardened execution sandboxes:
+    - `RealFileSystemAdapter`: Strict path containment within workspace sandboxes; blocks writes to sensitive files (`.env*`, `.git/`, `node_modules/`, `*.pem`, `*.key`).
+    - `RealTerminalCommandAdapter`: Strict executable allowlist (`APPROVED_EXECUTABLES`), shell injection prevention (`DANGEROUS_ARG_PATTERNS`), and sensitive environment variable stripping.
+    - `RealHttpNetworkAdapter`: SSRF protection blocking loopback (`127.*`, `[::1]`), private IP spaces (`10.*`, `172.16-31.*`, `192.168.*`), and cloud metadata (`169.254.169.254`); sanitizes sensitive HTTP headers.
+    - Browser/Desktop automation: Documented as outstanding integration surface with clean adapter contracts.
   - Verifiable task execution records (`TaskExecutionRecord`): captures exact start/completion timestamps, duration, invoked tool, authorized capability, exit/status codes, outputs, and artifact references into `task_execution_records`.
-  - Agent and department capability verification (`hierarchy.assertCapability()`).
-  - Cycle-safe parameter credential inspection (`assertNoRawCredentials()`).
-  - Telemetry logging and emergency halt freezing.
+  - Automatic performance event emission: Tool execution directly emits persistent performance telemetry into `PerformanceEventStore`.
 
 ---
 
@@ -261,16 +271,26 @@ flowchart TD
 ---
 
 ### 2.14 End-to-End Autonomous Corporate Lifecycle (Milestone 2.7)
-- **Unified Workflow Verification (`e2e-corporate-lifecycle.test.ts`):** Validates the full corporate lifecycle across the monorepo:
-  1. Owner submits Strategic Directive to CEO.
-  2. CEO verifies Owner authority, decomposes directive into initiatives and tasks.
-  3. Tasks are delegated to Department Directors and assigned to Specialists.
-  4. Routine tasks execute autonomously via Tool Execution Runtime with real execution adapters and working memory scratchpads.
-  5. Consequential tasks are quarantined for Owner review.
-  6. Owner explicitly authorizes quarantined consequential actions; AI self-approvals are rejected.
-  7. Pre-execution revalidation verifies cryptographic parameter hash integrity before any consequential execution.
-  8. Execution outcomes, artifacts, and lessons are committed to Episodic Memory.
-  9. Task metrics, complexity scores, and budget burn are recorded in Performance Management.
-  10. Evidence-based performance reviews and department health analytics are generated without mutating agent records.
-  11. Executive Board Report is compiled by the CEO and presented to the Owner.
-- **Monorepo Build & Test Verification:** All 12 packages/services compile cleanly (`pnpm -r build`), and all 156 tests across 17 test files pass with 0 failures.
+- **Unified 21-Step Workflow Verification (`production-lifecycle.test.ts` & `e2e-corporate-lifecycle.test.ts`):** Validates the full corporate lifecycle across the monorepo:
+  1. Authenticated Owner initializes corporate infrastructure.
+  2. Owner issues Strategic Directive to CEO.
+  3. CEO orchestrator validates Owner identity and ingests directive.
+  4. CEO decomposes directive into departmental initiatives.
+  5. Executive communication router dispatches initiatives to Department Directors.
+  6. Durable message persistence records envelopes in PostgreSQL storage.
+  7. Department Director receives initiative and acknowledges receipt.
+  8. Director decomposes initiative into tactical specialist tasks.
+  9. Working memory scratchpad allocated in PostgreSQL for task execution.
+  10. Specialist agent queries institutional semantic memory for corporate standards.
+  11. Autonomous task execution initiates routine tool invocation.
+  12. Tool execution runtime sandboxes file system and terminal operations.
+  13. Consequential action policy engine detects consequential action and quarantines it.
+  14. Owner reviews quarantined consequential action request.
+  15. Authentic Owner issues cryptographically verified approval session token.
+  16. Pre-execution revalidation verifies cryptographic parameter hash integrity before execution.
+  17. Authorized consequential action executes; replay attempts are rejected.
+  18. Execution results, duration, and artifacts logged to Episodic Memory.
+  19. Performance events recorded to persistent PostgreSQL performance store.
+  20. Evidence-based quarterly performance review generated without agent record mutation.
+  21. Executive Board Report compiled by CEO and presented to Owner.
+- **Monorepo Build & Test Verification:** All 12 packages/services compile cleanly (`pnpm -r build`), and all 160 tests across 18 test files pass with 0 failures.
