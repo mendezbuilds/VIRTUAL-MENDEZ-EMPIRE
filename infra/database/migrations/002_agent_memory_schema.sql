@@ -1,14 +1,90 @@
 -- ============================================================================
--- VIRTUAL MENDEZ EMPIRE — AGENT MEMORY SCHEMA & ROW-LEVEL SECURITY
+-- VIRTUAL MENDEZ EMPIRE — AGENT MEMORY SCHEMA & DUAL-LAYER ABAC / RLS
 -- Migration: 002_agent_memory_schema.sql
--- Covers: Working, Episodic, Semantic (pgvector HNSW), Procedural Playbooks
+-- Covers: Working, Episodic, Semantic (Flexible Dimension & Vector), Procedural Playbooks
+-- Enforces: Attribute-Based Access Control (ABAC) at Database Engine Layer
 -- ============================================================================
 
--- Ensure required pgvector extension
-CREATE EXTENSION IF NOT EXISTS "vector";
+-- Optional pgvector extension (if available on host PostgreSQL engine)
+DO $$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS "vector";
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'pgvector extension not available; falling back to native array vector operations.';
+END $$;
 
 -- ----------------------------------------------------------------------------
--- 1. WORKING MEMORY TABLE (Ephemeral / Task-Scoped Scratchpads)
+-- 1. ABAC & SESSION CONTEXT SECURITY FUNCTIONS
+-- ----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION get_current_agent_id() RETURNS UUID AS $$
+BEGIN
+  RETURN NULLIF(current_setting('app.current_agent_id', true), '')::UUID;
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, public;
+
+CREATE OR REPLACE FUNCTION get_current_department_id() RETURNS VARCHAR AS $$
+BEGIN
+  RETURN NULLIF(current_setting('app.current_department_id', true), '');
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, public;
+
+CREATE OR REPLACE FUNCTION get_current_principal_level() RETURNS VARCHAR AS $$
+BEGIN
+  RETURN NULLIF(current_setting('app.current_principal_level', true), '');
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, public;
+
+CREATE OR REPLACE FUNCTION is_current_principal_owner() RETURNS BOOLEAN AS $$
+BEGIN
+  RETURN get_current_principal_level() = 'OWNER' 
+      OR get_current_agent_id() = '00000000-0000-0000-0000-000000000000'::UUID;
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, public;
+
+CREATE OR REPLACE FUNCTION is_current_principal_executive() RETURNS BOOLEAN AS $$
+BEGIN
+  RETURN is_current_principal_owner() 
+      OR get_current_principal_level() = 'EXECUTIVE'
+      OR get_current_department_id() = 'executive_office';
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, public;
+
+CREATE OR REPLACE FUNCTION is_current_principal_director() RETURNS BOOLEAN AS $$
+BEGIN
+  RETURN is_current_principal_executive() 
+      OR get_current_principal_level() = 'DIRECTOR';
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, public;
+
+-- Flexible Dimension Cosine Similarity Function for any vector dimension
+CREATE OR REPLACE FUNCTION cosine_similarity_array(a DOUBLE PRECISION[], b DOUBLE PRECISION[])
+RETURNS DOUBLE PRECISION AS $$
+DECLARE
+  dot DOUBLE PRECISION := 0;
+  norm_a DOUBLE PRECISION := 0;
+  norm_b DOUBLE PRECISION := 0;
+  i INT;
+  len INT;
+BEGIN
+  len := array_length(a, 1);
+  IF len IS NULL OR len != array_length(b, 1) THEN
+    RETURN 0;
+  END IF;
+  FOR i IN 1..len LOOP
+    dot := dot + (a[i] * b[i]);
+    norm_a := norm_a + (a[i] * a[i]);
+    norm_b := norm_b + (b[i] * b[i]);
+  END LOOP;
+  IF norm_a = 0 OR norm_b = 0 THEN
+    RETURN 0;
+  END IF;
+  RETURN dot / (sqrt(norm_a) * sqrt(norm_b));
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
+-- ----------------------------------------------------------------------------
+-- 2. WORKING MEMORY TABLE (Task-Scoped Scratchpads with TTL)
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS agent_working_memories (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -27,7 +103,7 @@ CREATE INDEX IF NOT EXISTS idx_working_mem_expires ON agent_working_memories(exp
 CREATE INDEX IF NOT EXISTS idx_working_mem_task_agent ON agent_working_memories(task_id, agent_id);
 
 -- ----------------------------------------------------------------------------
--- 2. EPISODIC MEMORIES TABLE (Persistent Time-Series Interaction Log)
+-- 3. EPISODIC MEMORIES TABLE (Time-Sequenced Interaction Log)
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS agent_episodic_memories (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -55,7 +131,7 @@ CREATE INDEX IF NOT EXISTS idx_episodic_action ON agent_episodic_memories(action
 CREATE INDEX IF NOT EXISTS idx_episodic_task ON agent_episodic_memories(task_id);
 
 -- ----------------------------------------------------------------------------
--- 3. SEMANTIC MEMORIES TABLE (Vector-Indexed Corporate & Domain Knowledge)
+-- 4. SEMANTIC MEMORIES TABLE (Multi-Provider, Flexible Dimension Vectors)
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS agent_semantic_memories (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -66,10 +142,10 @@ CREATE TABLE IF NOT EXISTS agent_semantic_memories (
   category VARCHAR(64) NOT NULL,
   title VARCHAR(256) NOT NULL,
   content TEXT NOT NULL,
-  embedding vector(1536) NOT NULL, -- Standard 1536-dimensional vector embedding
-  embedding_provider VARCHAR(64) NOT NULL DEFAULT 'mock',
-  embedding_model VARCHAR(64) NOT NULL DEFAULT 'mock-embedding-v1',
-  embedding_dimension INT NOT NULL DEFAULT 1536,
+  embedding DOUBLE PRECISION[] NOT NULL, -- Flexible dimension vector array
+  embedding_provider VARCHAR(64) NOT NULL DEFAULT 'openai',
+  embedding_model VARCHAR(64) NOT NULL DEFAULT 'text-embedding-3-small',
+  embedding_dimension INT NOT NULL,
   embedding_version VARCHAR(32) NOT NULL DEFAULT '1.0.0',
   importance_score INT NOT NULL DEFAULT 5 CHECK (importance_score BETWEEN 1 AND 10),
   tags TEXT[] NOT NULL DEFAULT '{}',
@@ -78,18 +154,16 @@ CREATE TABLE IF NOT EXISTS agent_semantic_memories (
   is_deprecated BOOLEAN NOT NULL DEFAULT false,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT chk_semantic_dim_positive CHECK (embedding_dimension > 0)
 );
 
--- HNSW Vector Index for Cosine Similarity Search
-CREATE INDEX IF NOT EXISTS idx_semantic_embedding_hnsw ON agent_semantic_memories 
-USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
-
 CREATE INDEX IF NOT EXISTS idx_semantic_scope_dept ON agent_semantic_memories(scope, department_id);
+CREATE INDEX IF NOT EXISTS idx_semantic_provider_model ON agent_semantic_memories(embedding_provider, embedding_model, embedding_dimension);
 CREATE INDEX IF NOT EXISTS idx_semantic_fulltext ON agent_semantic_memories USING gin(to_tsvector('english', title || ' ' || content));
 
 -- ----------------------------------------------------------------------------
--- 4. PROCEDURAL MEMORIES TABLE (Versioned SOPs & Operational Playbooks)
+-- 5. PROCEDURAL MEMORIES TABLE (Versioned SOP Playbooks & Metrics)
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS agent_procedural_memories (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -117,8 +191,9 @@ CREATE INDEX IF NOT EXISTS idx_procedural_scope_dept ON agent_procedural_memorie
 CREATE INDEX IF NOT EXISTS idx_procedural_name ON agent_procedural_memories(name);
 
 -- ----------------------------------------------------------------------------
--- 5. ROW-LEVEL SECURITY POLICIES
+-- 6. ADVANCED ROW-LEVEL SECURITY POLICIES (DATABASE-LEVEL ABAC)
 -- ----------------------------------------------------------------------------
+
 ALTER TABLE agent_working_memories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE agent_working_memories FORCE ROW LEVEL SECURITY;
 
@@ -131,15 +206,108 @@ ALTER TABLE agent_semantic_memories FORCE ROW LEVEL SECURITY;
 ALTER TABLE agent_procedural_memories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE agent_procedural_memories FORCE ROW LEVEL SECURITY;
 
--- Tenant Isolation Policies
-CREATE POLICY working_mem_tenant_policy ON agent_working_memories
-FOR ALL USING (tenant_id = get_current_tenant_id());
+-- Drop existing generic policies if any
+DROP POLICY IF EXISTS working_mem_tenant_policy ON agent_working_memories;
+DROP POLICY IF EXISTS episodic_mem_tenant_policy ON agent_episodic_memories;
+DROP POLICY IF EXISTS semantic_mem_tenant_policy ON agent_semantic_memories;
+DROP POLICY IF EXISTS procedural_mem_tenant_policy ON agent_procedural_memories;
 
-CREATE POLICY episodic_mem_tenant_policy ON agent_episodic_memories
-FOR ALL USING (tenant_id = get_current_tenant_id());
+-- A. Working Memory RLS
+CREATE POLICY working_mem_abac_policy ON agent_working_memories
+FOR ALL USING (
+  tenant_id = get_current_tenant_id()
+  AND (agent_id = get_current_agent_id() OR is_current_principal_owner())
+);
 
-CREATE POLICY semantic_mem_tenant_policy ON agent_semantic_memories
-FOR ALL USING (tenant_id = get_current_tenant_id());
+-- B. Episodic Memory RLS
+CREATE POLICY episodic_mem_abac_select_policy ON agent_episodic_memories
+FOR SELECT USING (
+  tenant_id = get_current_tenant_id()
+  AND (
+    (scope = 'AGENT_PRIVATE' AND (agent_id = get_current_agent_id() OR is_current_principal_owner()))
+    OR (scope = 'DEPARTMENT_SCOPED' AND (department_id = get_current_department_id() OR is_current_principal_executive()))
+    OR (scope = 'ORGANIZATION_WIDE')
+  )
+);
 
-CREATE POLICY procedural_mem_tenant_policy ON agent_procedural_memories
-FOR ALL USING (tenant_id = get_current_tenant_id());
+CREATE POLICY episodic_mem_abac_insert_policy ON agent_episodic_memories
+FOR INSERT WITH CHECK (
+  tenant_id = get_current_tenant_id()
+  AND (
+    (scope = 'AGENT_PRIVATE' AND (agent_id = get_current_agent_id() OR is_current_principal_owner()))
+    OR (scope = 'DEPARTMENT_SCOPED' AND (department_id = get_current_department_id() OR is_current_principal_executive()))
+    OR (scope = 'ORGANIZATION_WIDE' AND is_current_principal_executive())
+  )
+);
+
+CREATE POLICY episodic_mem_abac_delete_policy ON agent_episodic_memories
+FOR DELETE USING (
+  tenant_id = get_current_tenant_id()
+  AND (
+    (scope = 'AGENT_PRIVATE' AND (agent_id = get_current_agent_id() OR is_current_principal_owner()))
+    OR (scope = 'DEPARTMENT_SCOPED' AND ((department_id = get_current_department_id() AND is_current_principal_director()) OR is_current_principal_executive()))
+    OR (scope = 'ORGANIZATION_WIDE' AND is_current_principal_executive())
+  )
+);
+
+-- C. Semantic Memory RLS
+CREATE POLICY semantic_mem_abac_select_policy ON agent_semantic_memories
+FOR SELECT USING (
+  tenant_id = get_current_tenant_id()
+  AND (
+    (scope = 'AGENT_PRIVATE' AND (author_agent_id = get_current_agent_id() OR is_current_principal_owner()))
+    OR (scope = 'DEPARTMENT_SCOPED' AND (department_id = get_current_department_id() OR is_current_principal_executive()))
+    OR (scope = 'ORGANIZATION_WIDE')
+  )
+);
+
+CREATE POLICY semantic_mem_abac_write_policy ON agent_semantic_memories
+FOR INSERT WITH CHECK (
+  tenant_id = get_current_tenant_id()
+  AND (
+    (scope = 'AGENT_PRIVATE' AND (author_agent_id = get_current_agent_id() OR is_current_principal_owner()))
+    OR (scope = 'DEPARTMENT_SCOPED' AND ((department_id = get_current_department_id() AND is_current_principal_director()) OR is_current_principal_executive()))
+    OR (scope = 'ORGANIZATION_WIDE' AND is_current_principal_executive())
+  )
+);
+
+CREATE POLICY semantic_mem_abac_update_policy ON agent_semantic_memories
+FOR UPDATE USING (
+  tenant_id = get_current_tenant_id()
+  AND (
+    (scope = 'AGENT_PRIVATE' AND (author_agent_id = get_current_agent_id() OR is_current_principal_owner()))
+    OR (scope = 'DEPARTMENT_SCOPED' AND ((department_id = get_current_department_id() AND is_current_principal_director()) OR is_current_principal_executive()))
+    OR (scope = 'ORGANIZATION_WIDE' AND is_current_principal_executive())
+  )
+);
+
+-- D. Procedural Memory RLS
+CREATE POLICY procedural_mem_abac_select_policy ON agent_procedural_memories
+FOR SELECT USING (
+  tenant_id = get_current_tenant_id()
+  AND (
+    (scope = 'AGENT_PRIVATE' AND (author_agent_id = get_current_agent_id() OR is_current_principal_owner()))
+    OR (scope = 'DEPARTMENT_SCOPED' AND (department_id = get_current_department_id() OR is_current_principal_executive()))
+    OR (scope = 'ORGANIZATION_WIDE')
+  )
+);
+
+CREATE POLICY procedural_mem_abac_write_policy ON agent_procedural_memories
+FOR INSERT WITH CHECK (
+  tenant_id = get_current_tenant_id()
+  AND (
+    (scope = 'AGENT_PRIVATE' AND (author_agent_id = get_current_agent_id() OR is_current_principal_owner()))
+    OR (scope = 'DEPARTMENT_SCOPED' AND ((department_id = get_current_department_id() AND is_current_principal_director()) OR is_current_principal_executive()))
+    OR (scope = 'ORGANIZATION_WIDE' AND is_current_principal_executive())
+  )
+);
+
+CREATE POLICY procedural_mem_abac_update_policy ON agent_procedural_memories
+FOR UPDATE USING (
+  tenant_id = get_current_tenant_id()
+  AND (
+    (scope = 'AGENT_PRIVATE' AND (author_agent_id = get_current_agent_id() OR is_current_principal_owner()))
+    OR (scope = 'DEPARTMENT_SCOPED' AND ((department_id = get_current_department_id() AND is_current_principal_director()) OR is_current_principal_executive()))
+    OR (scope = 'ORGANIZATION_WIDE' AND is_current_principal_executive())
+  )
+);

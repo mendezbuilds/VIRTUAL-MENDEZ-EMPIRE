@@ -13,6 +13,12 @@ import {
 import type { DepartmentRegistry } from '@vme/department-hierarchy';
 import type { EmergencySupervisor } from '@vme/security-governance';
 import type { EpisodicMemory } from '@vme/agent-memory';
+import {
+  PostgresMessageStorage,
+  PostgresMessageStorageError,
+} from './postgres-message-storage.js';
+
+export type MessageRouterMode = 'PRODUCTION_POSTGRES' | 'TEST_IN_MEMORY';
 
 export interface SendMessageParams {
   messageId?: string;
@@ -29,8 +35,10 @@ export interface SendMessageParams {
 }
 
 export interface MessageRouterOptions {
+  mode?: MessageRouterMode;
   emergencySupervisor?: EmergencySupervisor;
   episodicMemory?: EpisodicMemory;
+  postgresStorage?: PostgresMessageStorage;
 }
 
 export class MessageRoutingError extends Error {
@@ -41,6 +49,7 @@ export class MessageRoutingError extends Error {
 }
 
 export class MessageRouter {
+  public readonly mode: MessageRouterMode;
   private inboxes = new Map<string, AgentMessageEnvelope[]>(); // agentId -> messages
   private deadLetterQueue: AgentMessageEnvelope[] = [];
   private processedMessageIds = new Set<string>();
@@ -49,11 +58,19 @@ export class MessageRouter {
 
   private readonly emergencySupervisor?: EmergencySupervisor;
   private readonly episodicMemory?: EpisodicMemory;
+  public readonly postgresStorage?: PostgresMessageStorage;
 
   constructor(
     private readonly hierarchy: DepartmentRegistry,
     options?: MessageRouterOptions
   ) {
+    this.mode = options?.mode ?? (options?.postgresStorage ? 'PRODUCTION_POSTGRES' : 'TEST_IN_MEMORY');
+    if (this.mode === 'PRODUCTION_POSTGRES' && !options?.postgresStorage) {
+      throw new PostgresMessageStorageError(
+        'Production message router initialization failed: PostgresMessageStorage is required. In-memory fallback is disabled in production.'
+      );
+    }
+    this.postgresStorage = options?.postgresStorage;
     this.emergencySupervisor = options?.emergencySupervisor;
     this.episodicMemory = options?.episodicMemory;
   }
@@ -124,6 +141,10 @@ export class MessageRouter {
       const parsedExpired = AgentMessageEnvelopeSchema.parse(envelope);
       this.deadLetterQueue.push(parsedExpired);
       this.messageStatuses.set(envelope.messageId, 'EXPIRED');
+      if (this.postgresStorage) {
+        await this.postgresStorage.persistEnvelope(parsedExpired);
+        await this.postgresStorage.routeToDeadLetter(parsedExpired, 'Message expired prior to delivery', 0);
+      }
       return parsedExpired;
     }
 
@@ -137,6 +158,10 @@ export class MessageRouter {
     }
     recipientInbox.push(parsedEnvelope);
     this.messageStatuses.set(envelope.messageId, 'DELIVERED');
+
+    if (this.postgresStorage) {
+      await this.postgresStorage.persistEnvelope(parsedEnvelope);
+    }
 
     // 9. Episodic Memory Integration (Audit Trail)
     if (this.episodicMemory) {
@@ -248,7 +273,87 @@ export class MessageRouter {
       }
     }
 
+    if (this.postgresStorage) {
+      this.postgresStorage.recordAcknowledgment(ack).catch(() => {});
+      if (status === 'REJECTED') {
+        const dummyEnvelope = (this.deadLetterQueue.find((m) => m.messageId === messageId) ?? {
+          messageId,
+          senderAgentId: '00000000-0000-0000-0000-000000000000',
+          senderAgentCode: 'UNKNOWN',
+          senderDepartmentId: 'executive_office',
+          recipientAgentId,
+          recipientAgentCode: 'UNKNOWN',
+          recipientDepartmentId: 'executive_office',
+          type: 'INFORMATION_RESPONSE',
+          priority: 'MEDIUM',
+          payload: {},
+          correlationId: randomUUID(),
+          deliveryStatus: 'FAILED',
+          requiresResponse: false,
+          sentAt: new Date().toISOString(),
+        }) as AgentMessageEnvelope;
+        this.postgresStorage
+          .routeToDeadLetter(dummyEnvelope, rejectionReason ?? 'Message rejected by recipient', 0)
+          .catch(() => {});
+      }
+    }
+
     return ack;
+  }
+
+  async acknowledgeMessageAsync(
+    messageId: string,
+    recipientAgentId: string,
+    status: 'ACCEPTED' | 'REJECTED' | 'QUEUED',
+    rejectionReason?: string
+  ): Promise<MessageAcknowledgment> {
+    const ack = this.acknowledgeMessage(messageId, recipientAgentId, status, rejectionReason);
+    if (this.postgresStorage) {
+      await this.postgresStorage.recordAcknowledgment(ack);
+    }
+    return ack;
+  }
+
+  async recoverPendingMessages(): Promise<AgentMessageEnvelope[]> {
+    if (!this.postgresStorage) {
+      return [];
+    }
+    const recovered = await this.postgresStorage.recoverPendingMessages();
+    for (const msg of recovered) {
+      let inbox = this.inboxes.get(msg.recipientAgentId);
+      if (!inbox) {
+        inbox = [];
+        this.inboxes.set(msg.recipientAgentId, inbox);
+      }
+      if (!inbox.some((m) => m.messageId === msg.messageId)) {
+        inbox.push(msg);
+      }
+      this.messageStatuses.set(msg.messageId, msg.deliveryStatus ?? 'PENDING');
+    }
+    return recovered;
+  }
+
+  async retryDeadLetterWithBackoff(
+    messageId: string,
+    baseIntervalMs: number = 1000,
+    maxRetries: number = 3
+  ): Promise<{ retried: boolean; nextRetryAt?: string; envelope?: AgentMessageEnvelope }> {
+    if (this.postgresStorage) {
+      const schedule = await this.postgresStorage.calculateBackoffAndScheduleRetry(
+        messageId,
+        0,
+        baseIntervalMs,
+        maxRetries
+      );
+      if (schedule.shouldRetry) {
+        const msg = await this.retryDeadLetter(messageId);
+        return { retried: true, nextRetryAt: schedule.nextRetryAt, envelope: msg };
+      }
+      return { retried: false };
+    }
+
+    const msg = await this.retryDeadLetter(messageId);
+    return { retried: !!msg, envelope: msg };
   }
 
   getInbox(agentId: string): AgentMessageEnvelope[] {

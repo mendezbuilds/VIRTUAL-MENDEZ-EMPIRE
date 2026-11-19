@@ -7,3 +7,4 @@ export * from './memory-access-controller.js';
 export * from './retrieval-engine.js';
 export * from './consolidation-pipeline.js';
 export * from './memory-engine.js';
+export * from './postgres-memory-storage.js';

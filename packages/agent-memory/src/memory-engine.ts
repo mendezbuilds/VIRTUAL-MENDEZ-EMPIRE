@@ -1,3 +1,4 @@
+import type { Pool } from 'pg';
 import {
   type EpisodicMemoryRecord,
   type SemanticKnowledgeItem,
@@ -30,8 +31,20 @@ import {
   type SemanticPromotionRequest,
   type ProceduralPromotionRequest,
 } from './consolidation-pipeline.js';
+import {
+  PostgresEpisodicStorage,
+  PostgresSemanticStorage,
+  PostgresProceduralStorage,
+  PostgresStorageError,
+  type RlsSessionContext,
+} from './postgres-memory-storage.js';
+
+export type MemoryEngineMode = 'PRODUCTION_POSTGRES' | 'TEST_IN_MEMORY';
 
 export interface AgentMemoryEngineOptions {
+  mode?: MemoryEngineMode;
+  pool?: Pool;
+  defaultTenantId?: string;
   workingMemory?: WorkingMemory;
   episodicMemory?: EpisodicMemory;
   semanticMemory?: SemanticMemory;
@@ -40,11 +53,13 @@ export interface AgentMemoryEngineOptions {
 }
 
 /**
- * Unified Agent Memory Engine.
- * Integrates working, episodic, semantic, and procedural memory tiers with
+ * Production-Grade Agent Memory Engine.
+ * Supports real PostgreSQL-backed persistent storage with database-level RLS,
  * centralized ABAC access control, credential defense, and emergency halt freezing.
+ * Does not silently fall back to in-memory when production PostgreSQL mode is configured.
  */
 export class AgentMemoryEngine {
+  public readonly mode: MemoryEngineMode;
   public readonly working: WorkingMemory;
   public readonly episodic: EpisodicMemory;
   public readonly semantic: SemanticMemory;
@@ -54,14 +69,33 @@ export class AgentMemoryEngine {
   public readonly emergencySupervisor?: EmergencySupervisor;
 
   constructor(options?: AgentMemoryEngineOptions) {
-    this.working = options?.workingMemory ?? new WorkingMemory();
-    this.episodic =
-      options?.episodicMemory ?? new EpisodicMemory(new InMemoryEpisodicStorage());
-    this.semantic =
-      options?.semanticMemory ?? new SemanticMemory(new InMemorySemanticStorage());
-    this.procedural =
-      options?.proceduralMemory ?? new ProceduralMemory(new InMemoryProceduralStorage());
+    this.mode = options?.mode ?? (options?.pool ? 'PRODUCTION_POSTGRES' : 'TEST_IN_MEMORY');
     this.emergencySupervisor = options?.emergencySupervisor;
+
+    if (this.mode === 'PRODUCTION_POSTGRES') {
+      if (!options?.pool) {
+        throw new PostgresStorageError(
+          'Production memory engine initialization failed: PostgreSQL connection pool is required. In-memory fallback is disabled in production.'
+        );
+      }
+      const pool = options.pool;
+      const tenantId = options.defaultTenantId ?? '00000000-0000-0000-0000-000000000001';
+      const rlsContext: RlsSessionContext = { tenantId, principalLevel: 'OWNER' };
+
+      this.working = options.workingMemory ?? new WorkingMemory();
+      this.episodic = new EpisodicMemory(new PostgresEpisodicStorage(pool, rlsContext));
+      this.semantic = new SemanticMemory(new PostgresSemanticStorage(pool, rlsContext));
+      this.procedural = new ProceduralMemory(new PostgresProceduralStorage(pool, rlsContext));
+    } else {
+      // Explicit test double mode
+      this.working = options?.workingMemory ?? new WorkingMemory();
+      this.episodic =
+        options?.episodicMemory ?? new EpisodicMemory(new InMemoryEpisodicStorage());
+      this.semantic =
+        options?.semanticMemory ?? new SemanticMemory(new InMemorySemanticStorage());
+      this.procedural =
+        options?.proceduralMemory ?? new ProceduralMemory(new InMemoryProceduralStorage());
+    }
 
     this.retriever = new MemoryContextRetriever(
       this.working,

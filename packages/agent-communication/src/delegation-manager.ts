@@ -1,35 +1,43 @@
 import { OWNER_PRINCIPAL_ID, CANONICAL_OWNER_PRINCIPAL, type OrchestratedTask } from '@vme/shared-types';
 import type { DepartmentRegistry } from '@vme/department-hierarchy';
 import type { MessageRouter } from './message-router.js';
+import {
+  ConsequentialPolicyEngine,
+  type ConsequentialActionType,
+  computeParameterHash,
+  ConsequentialPolicyViolationError,
+  UnauthorizedOwnerDecisionError,
+} from './consequential-policy-engine.js';
 
 export interface OwnerAuthorizationRequest {
   id: string;
   taskId: string;
-  actionType: 'LIVE_TRADING' | 'CAPITAL_TRANSFER' | 'EXTERNAL_OUTREACH' | 'BINDING_CONTRACT';
+  actionType: ConsequentialActionType;
   agentId: string;
   departmentId: string;
   payload: Record<string, unknown>;
-  status: 'PENDING_OWNER_REVIEW' | 'APPROVED' | 'REJECTED';
+  parameterHash?: string;
+  validUntil?: string;
+  status: 'PENDING_OWNER_REVIEW' | 'APPROVED' | 'REJECTED' | 'EXPIRED' | 'EXECUTED';
   requestedAt: string;
   decidedBy?: string;
   decisionNotes?: string;
   decidedAt?: string;
 }
 
-export class UnauthorizedOwnerDecisionError extends Error {
-  constructor(message: string) {
-    super(`OWNER GOVERNANCE VIOLATION: ${message}`);
-    this.name = 'UnauthorizedOwnerDecisionError';
-  }
-}
+export { UnauthorizedOwnerDecisionError };
 
 export class DelegationManager {
   private pendingOwnerApprovals: OwnerAuthorizationRequest[] = [];
+  public readonly policyEngine?: ConsequentialPolicyEngine;
 
   constructor(
     private readonly hierarchy: DepartmentRegistry,
-    private readonly router: MessageRouter
-  ) {}
+    private readonly router: MessageRouter,
+    policyEngine?: ConsequentialPolicyEngine
+  ) {
+    this.policyEngine = policyEngine;
+  }
 
   /**
    * Delegates a task downward from supervisor to subordinate.
@@ -66,6 +74,9 @@ export class DelegationManager {
     const agent = this.hierarchy.getAgentRecord(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
 
+    const parameterHash = computeParameterHash(payload);
+    const validUntil = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
     const request: OwnerAuthorizationRequest = {
       id: `auth-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       taskId,
@@ -73,11 +84,26 @@ export class DelegationManager {
       agentId,
       departmentId: agent.departmentId,
       payload,
+      parameterHash,
+      validUntil,
       status: 'PENDING_OWNER_REVIEW',
       requestedAt: new Date().toISOString(),
     };
 
     this.pendingOwnerApprovals.push(request);
+
+    if (this.policyEngine) {
+      this.policyEngine
+        .quarantineAction({
+          taskId,
+          actionType,
+          agentId,
+          departmentId: agent.departmentId,
+          payload,
+        })
+        .catch(() => {});
+    }
+
     return { requiresOwnerApproval: true, request };
   }
 
@@ -109,6 +135,52 @@ export class DelegationManager {
     request.decidedBy = decidedBy;
     request.decisionNotes = decisionNotes;
     request.decidedAt = new Date().toISOString();
+
+    if (this.policyEngine) {
+      this.policyEngine
+        .resolveAuthorization(requestId, decision, decidedBy, decisionNotes)
+        .catch(() => {});
+    }
+
+    return request;
+  }
+
+  /**
+   * Step 6 of Consequential Action Lifecycle: Revalidates that an authorized request
+   * has not expired and that the parameters to execute cryptographically match the authorized hash.
+   */
+  revalidateConsequentialAction(
+    requestId: string,
+    payloadToExecute: Record<string, unknown>
+  ): OwnerAuthorizationRequest {
+    const request = this.pendingOwnerApprovals.find((r) => r.id === requestId);
+    if (!request) {
+      throw new ConsequentialPolicyViolationError(
+        `Owner authorization request '${requestId}' not found for revalidation.`
+      );
+    }
+
+    if (request.status !== 'APPROVED') {
+      throw new ConsequentialPolicyViolationError(
+        `Cannot execute consequential action ${requestId}: status is '${request.status}'. Owner approval is required.`
+      );
+    }
+
+    if (request.validUntil && new Date(request.validUntil).getTime() < Date.now()) {
+      request.status = 'EXPIRED';
+      throw new ConsequentialPolicyViolationError(
+        `Cannot execute consequential action ${requestId}: authorization has expired.`
+      );
+    }
+
+    if (request.parameterHash) {
+      const currentHash = computeParameterHash(payloadToExecute);
+      if (currentHash !== request.parameterHash) {
+        throw new ConsequentialPolicyViolationError(
+          `Cryptographic parameter hash mismatch! Authorized hash '${request.parameterHash}' does not match execution payload hash '${currentHash}'. Parameter tampering detected.`
+        );
+      }
+    }
 
     return request;
   }

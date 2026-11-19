@@ -1,7 +1,18 @@
 import { randomUUID } from 'node:crypto';
+import type { Pool } from 'pg';
 import { assertNoRawCredentials, type DepartmentId } from '@vme/shared-types';
 import type { DepartmentRegistry } from '@vme/department-hierarchy';
 import type { EmergencySupervisor } from '@vme/security-governance';
+import {
+  RealFileSystemAdapter,
+  RealTerminalCommandAdapter,
+  RealHttpNetworkAdapter,
+  TaskExecutionRecorder,
+  type TaskExecutionRecord,
+  type FileSystemToolInput,
+  type TerminalCommandInput,
+  type HttpNetworkInput,
+} from './real-execution-adapters.js';
 
 export interface ToolDefinition<TInput = Record<string, unknown>, TOutput = unknown> {
   name: string;
@@ -31,6 +42,13 @@ export interface ToolExecutionLog {
   executedAt: string;
 }
 
+export interface ToolRuntimeOptions {
+  emergencySupervisor?: EmergencySupervisor;
+  pool?: Pool;
+  tenantId?: string;
+  workspaceRoot?: string;
+}
+
 export class ToolExecutionError extends Error {
   constructor(message: string) {
     super(`TOOL RUNTIME ERROR: ${message}`);
@@ -42,10 +60,36 @@ export class ToolExecutionRuntime {
   private tools = new Map<string, ToolDefinition<any, any>>();
   private executionLogs: ToolExecutionLog[] = [];
 
+  private readonly emergencySupervisor?: EmergencySupervisor;
+  public readonly fsAdapter: RealFileSystemAdapter;
+  public readonly terminalAdapter: RealTerminalCommandAdapter;
+  public readonly httpAdapter: RealHttpNetworkAdapter;
+  public readonly executionRecorder: TaskExecutionRecorder;
+
   constructor(
     private readonly hierarchy: DepartmentRegistry,
-    private readonly emergencySupervisor?: EmergencySupervisor
+    optionsOrSupervisor?: EmergencySupervisor | ToolRuntimeOptions
   ) {
+    if (optionsOrSupervisor && 'assertOperational' in optionsOrSupervisor) {
+      this.emergencySupervisor = optionsOrSupervisor;
+      this.executionRecorder = new TaskExecutionRecorder();
+      this.fsAdapter = new RealFileSystemAdapter();
+      this.terminalAdapter = new RealTerminalCommandAdapter();
+      this.httpAdapter = new RealHttpNetworkAdapter();
+    } else if (optionsOrSupervisor) {
+      const opts = optionsOrSupervisor as ToolRuntimeOptions;
+      this.emergencySupervisor = opts.emergencySupervisor;
+      this.executionRecorder = new TaskExecutionRecorder(opts.pool, opts.tenantId);
+      this.fsAdapter = new RealFileSystemAdapter(opts.workspaceRoot);
+      this.terminalAdapter = new RealTerminalCommandAdapter(opts.workspaceRoot);
+      this.httpAdapter = new RealHttpNetworkAdapter();
+    } else {
+      this.executionRecorder = new TaskExecutionRecorder();
+      this.fsAdapter = new RealFileSystemAdapter();
+      this.terminalAdapter = new RealTerminalCommandAdapter();
+      this.httpAdapter = new RealHttpNetworkAdapter();
+    }
+
     this.registerBuiltinTools();
   }
 
@@ -100,7 +144,15 @@ export class ToolExecutionRuntime {
       );
     }
 
-    // 5. Execute Tool with Timing
+    // 5. Start Execution Recording
+    const taskRecord = await this.executionRecorder.startExecution({
+      taskId: context.taskId,
+      agentId: context.agentId,
+      toolInvoked: toolName,
+      authorizedCapability: tool.requiredCapability,
+    });
+
+    // 6. Execute Tool with Timing
     try {
       const result = await tool.execute(args, context);
       const durationMs = Date.now() - startTime;
@@ -115,6 +167,20 @@ export class ToolExecutionRuntime {
         isSuccessful: true,
         durationMs,
         executedAt: new Date().toISOString(),
+      });
+
+      const artifacts: string[] = [];
+      if (typeof result === 'object' && result !== null && 'absolutePath' in result && typeof (result as any).absolutePath === 'string') {
+        artifacts.push((result as any).absolutePath);
+      }
+
+      await this.executionRecorder.completeExecution({
+        recordId: taskRecord.id,
+        status: 'COMPLETED',
+        durationMs,
+        outputData: typeof result === 'object' && result !== null ? (result as Record<string, unknown>) : { result },
+        artifactReferences: artifacts,
+        verificationResult: 'VERIFIED_SUCCESS',
       });
 
       return result;
@@ -135,6 +201,14 @@ export class ToolExecutionRuntime {
         executedAt: new Date().toISOString(),
       });
 
+      await this.executionRecorder.completeExecution({
+        recordId: taskRecord.id,
+        status: 'FAILED',
+        durationMs,
+        errorMessage: errorMsg,
+        verificationResult: 'VERIFIED_FAILURE',
+      });
+
       throw new ToolExecutionError(`Tool execution failed for '${toolName}': ${errorMsg}`);
     }
   }
@@ -143,7 +217,36 @@ export class ToolExecutionRuntime {
     return [...this.executionLogs];
   }
 
+  getExecutionRecords(): TaskExecutionRecord[] {
+    return this.executionRecorder.listRecords();
+  }
+
   private registerBuiltinTools(): void {
+    // Real Execution Adapters
+    this.registerTool({
+      name: 'real_filesystem',
+      description: 'Sandboxed filesystem operations (read, write, list, stat, exists)',
+      requiredCapability: 'software_architecture',
+      departmentScope: 'technology_engineering',
+      execute: async (input: FileSystemToolInput) => this.fsAdapter.execute(input),
+    });
+
+    this.registerTool({
+      name: 'real_terminal_command',
+      description: 'Sandboxed subprocess and CLI command execution with timeout control',
+      requiredCapability: 'software_architecture',
+      departmentScope: 'technology_engineering',
+      execute: async (input: TerminalCommandInput) => this.terminalAdapter.execute(input),
+    });
+
+    this.registerTool({
+      name: 'real_http_client',
+      description: 'Real HTTP/HTTPS request execution for market APIs and feeds',
+      requiredCapability: 'job_market_scraping',
+      departmentScope: 'opportunity_acquisition',
+      execute: async (input: HttpNetworkInput) => this.httpAdapter.execute(input),
+    });
+
     // 1. Market Scraper Tool
     this.registerTool({
       name: 'market_scraper',

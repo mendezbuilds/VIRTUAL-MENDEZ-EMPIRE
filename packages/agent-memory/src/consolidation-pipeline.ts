@@ -10,6 +10,25 @@ import { SemanticMemory } from './semantic-memory.js';
 import { ProceduralMemory } from './procedural-memory.js';
 import { UnauthorizedMemoryAccessError } from './memory-access-controller.js';
 
+export class InsufficientEvidenceConsolidationError extends Error {
+  constructor(message: string) {
+    super(`CONSOLIDATION REJECTED: ${message}`);
+    this.name = 'InsufficientEvidenceConsolidationError';
+  }
+}
+
+export interface ConsolidationEvidencePolicy {
+  minSourceRecordCount: number;
+  minAverageImportanceScore: number;
+  minConfidenceScore: number;
+}
+
+export const DEFAULT_EVIDENCE_POLICY: ConsolidationEvidencePolicy = {
+  minSourceRecordCount: 3,
+  minAverageImportanceScore: 6.0,
+  minConfidenceScore: 0.75,
+};
+
 export interface SemanticPromotionRequest {
   sourceRecordIds: string[];
   records: EpisodicMemoryRecord[];
@@ -19,7 +38,12 @@ export interface SemanticPromotionRequest {
   synthesizedContent: string;
   embedding: number[];
   tags: string[];
+  provenance: string;
+  evidenceSummary: string;
+  confidenceScore: number;
   principal: MemoryAccessPrincipal;
+  approvingPrincipal?: MemoryAccessPrincipal;
+  policy?: Partial<ConsolidationEvidencePolicy>;
 }
 
 export interface ProceduralPromotionRequest {
@@ -39,7 +63,12 @@ export interface ProceduralPromotionRequest {
     timeoutMs?: number;
     retryLimit?: number;
   }>;
+  provenance: string;
+  evidenceSummary: string;
+  confidenceScore: number;
   principal: MemoryAccessPrincipal;
+  approvingPrincipal?: MemoryAccessPrincipal;
+  policy?: Partial<ConsolidationEvidencePolicy>;
 }
 
 export class MemoryConsolidator {
@@ -49,19 +78,50 @@ export class MemoryConsolidator {
   ) {}
 
   /**
-   * Promotes episodic learnings into persistent Semantic Knowledge with governance authorization checks.
+   * Promotes episodic learnings into persistent Semantic Knowledge with evidence validation and governance authorization.
    */
   async promoteToSemanticKnowledge(
     request: SemanticPromotionRequest
   ): Promise<SemanticKnowledgeItem> {
     const { principal, targetScope, records } = request;
+    const policy: ConsolidationEvidencePolicy = {
+      ...DEFAULT_EVIDENCE_POLICY,
+      ...request.policy,
+    };
 
-    // Minimum evidence validation
+    // 1. Minimum Evidence Verification
     if (!records || records.length === 0) {
-      throw new Error('Consolidation requires at least one source episodic record.');
+      throw new InsufficientEvidenceConsolidationError(
+        'Consolidation requires at least one source episodic record.'
+      );
     }
 
-    // Governance checks for scope escalation
+    const avgImportance =
+      records.reduce((acc, r) => acc + (r.importanceScore ?? 5), 0) / records.length;
+
+    // A single episode must not automatically become trusted knowledge unless it has extraordinary importance
+    if (records.length < policy.minSourceRecordCount) {
+      const hasCriticalSignal = records.some((r) => r.importanceScore >= 8);
+      if (!hasCriticalSignal) {
+        throw new InsufficientEvidenceConsolidationError(
+          `Insufficient evidence: ${records.length} records provided, minimum required is ${policy.minSourceRecordCount} (or single critical record with importance >= 8).`
+        );
+      }
+    }
+
+    if (avgImportance < policy.minAverageImportanceScore) {
+      throw new InsufficientEvidenceConsolidationError(
+        `Average importance score (${avgImportance.toFixed(1)}) is below policy threshold (${policy.minAverageImportanceScore}).`
+      );
+    }
+
+    if (request.confidenceScore < policy.minConfidenceScore) {
+      throw new InsufficientEvidenceConsolidationError(
+        `Consolidation confidence (${request.confidenceScore}) is below quality threshold (${policy.minConfidenceScore}).`
+      );
+    }
+
+    // 2. Governance Authorization Check for Scope Elevation
     if (targetScope === 'ORGANIZATION_WIDE') {
       if (
         principal.principalType !== 'OWNER_PRINCIPAL' &&
@@ -83,8 +143,8 @@ export class MemoryConsolidator {
       }
     }
 
-    const avgImportance =
-      records.reduce((acc, r) => acc + (r.importanceScore ?? 5), 0) / records.length;
+    const now = new Date().toISOString();
+    const approving = request.approvingPrincipal ?? principal;
 
     const newItem: SemanticKnowledgeItem = {
       id: randomUUID(),
@@ -96,8 +156,8 @@ export class MemoryConsolidator {
       content: request.synthesizedContent,
       embedding: request.embedding,
       embeddingMetadata: {
-        provider: 'mock',
-        model: 'mock-embedding-v1',
+        provider: 'openai',
+        model: 'text-embedding-3-small',
         dimension: request.embedding.length,
         version: '1.0.0',
       },
@@ -108,9 +168,15 @@ export class MemoryConsolidator {
       metadata: {
         sourceRecordCount: records.length,
         sourceRecordIds: request.sourceRecordIds,
-        consolidatedAt: new Date().toISOString(),
+        provenance: request.provenance,
+        evidenceSummary: request.evidenceSummary,
+        confidenceScore: request.confidenceScore,
+        promotedAt: now,
+        promotedBy: principal.principalId,
+        approvingPrincipal: approving.principalId,
+        versionHistory: ['1.0.0'],
       },
-      createdAt: new Date().toISOString(),
+      createdAt: now,
     };
 
     await this.semanticMemory.storeKnowledge(newItem, principal);
@@ -119,14 +185,30 @@ export class MemoryConsolidator {
 
   /**
    * Promotes repeated episodic procedures into a validated SOP Playbook.
+   * Playbooks remain stored guidance until authorized.
    */
   async promoteToProceduralPlaybook(
     request: ProceduralPromotionRequest
   ): Promise<ProceduralPlaybook> {
     const { principal, targetScope, records } = request;
+    const policy: ConsolidationEvidencePolicy = {
+      ...DEFAULT_EVIDENCE_POLICY,
+      ...request.policy,
+    };
 
     if (!records || records.length === 0) {
-      throw new Error('Procedural promotion requires source episodic records.');
+      throw new InsufficientEvidenceConsolidationError(
+        'Procedural promotion requires source episodic records.'
+      );
+    }
+
+    if (records.length < policy.minSourceRecordCount) {
+      const hasHighRelevance = records.some((r) => r.importanceScore >= 8);
+      if (!hasHighRelevance) {
+        throw new InsufficientEvidenceConsolidationError(
+          `Insufficient procedural evidence: ${records.length} records provided, minimum required is ${policy.minSourceRecordCount}.`
+        );
+      }
     }
 
     if (targetScope === 'ORGANIZATION_WIDE') {
@@ -150,13 +232,20 @@ export class MemoryConsolidator {
       }
     }
 
+    const now = new Date().toISOString();
+    const approving = request.approvingPrincipal ?? principal;
+    const isLeadership =
+      principal.principalType === 'OWNER_PRINCIPAL' ||
+      principal.level === 'EXECUTIVE' ||
+      principal.level === 'DIRECTOR';
+
     const playbook: ProceduralPlaybook = {
       id: randomUUID(),
       scope: targetScope,
       departmentId: records[0]?.departmentId,
       authorAgentId: principal.principalId,
       authorAgentCode: principal.agentCode,
-      authorizedBy: principal.principalId,
+      authorizedBy: isLeadership ? approving.principalId : 'PENDING_APPROVAL',
       name: request.name,
       description: request.description,
       triggerCondition: request.triggerCondition,
@@ -173,12 +262,16 @@ export class MemoryConsolidator {
       successCount: records.filter((r) => r.status === 'SUCCESS').length,
       failureCount: records.filter((r) => r.status === 'FAILURE').length,
       version: '1.0.0',
-      isApproved: true,
+      isApproved: isLeadership, // Only approved if author/approver is leadership; otherwise remains guidance
       metadata: {
         sourceRecordIds: request.sourceRecordIds,
-        consolidatedAt: new Date().toISOString(),
+        provenance: request.provenance,
+        evidenceSummary: request.evidenceSummary,
+        confidenceScore: request.confidenceScore,
+        consolidatedAt: now,
+        versionHistory: ['1.0.0'],
       },
-      createdAt: new Date().toISOString(),
+      createdAt: now,
     };
 
     await this.proceduralMemory.storePlaybook(playbook, principal);

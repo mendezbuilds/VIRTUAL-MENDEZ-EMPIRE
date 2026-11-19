@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { DepartmentRegistry } from '@vme/department-hierarchy';
 import { MessageRouter, DelegationManager, UnauthorizedOwnerDecisionError } from '@vme/agent-communication';
 import {
@@ -53,7 +56,12 @@ describe('VIRTUAL MENDEZ EMPIRE — End-to-End Corporate Lifecycle (Phase 2)', (
       orchestratorRegistry.registerAgent(agent);
     }
 
-    const toolRuntime = new ToolExecutionRuntime(hierarchy, supervisor);
+    const testSandboxDir = mkdtempSync(join(tmpdir(), 'vme-e2e-sandbox-'));
+    try {
+      const toolRuntime = new ToolExecutionRuntime(hierarchy, {
+        emergencySupervisor: supervisor,
+        workspaceRoot: testSandboxDir,
+      });
 
     const coordinator = new AutonomyCoordinator(
       hierarchy,
@@ -137,6 +145,36 @@ describe('VIRTUAL MENDEZ EMPIRE — End-to-End Corporate Lifecycle (Phase 2)', (
     expect(approvedRequest.status).toBe('APPROVED');
     expect(approvedRequest.decidedBy).toBe(OWNER_PRINCIPAL_ID);
 
+    // Pre-execution revalidation verifies parameter integrity
+    const revalidated = delegation.revalidateConsequentialAction(
+      approvedRequest.id,
+      quarantined.inputData
+    );
+    expect(revalidated.status).toBe('APPROVED');
+
+    // 4b. Genuine Tool Execution with Real Adapters
+    const techArch = hierarchy.getAgentRecord('TECH-ARCH')!;
+    const realToolResult = (await toolRuntime.executeTool(
+      'real_filesystem',
+      {
+        action: 'write',
+        relativePath: 'reports/q4_market_dossier.md',
+        content: '# Q4 Executive Market Dossier\n\nVerified leads and algorithmic models.',
+      },
+      {
+        agentId: techArch.id,
+        agentCode: techArch.agentCode,
+        departmentId: techArch.departmentId,
+        taskId: executionResult.completedTasks[0]!.id,
+      }
+    )) as any;
+    expect(realToolResult.verified).toBe(true);
+
+    const execRecords = toolRuntime.getExecutionRecords();
+    expect(execRecords.length).toBeGreaterThanOrEqual(1);
+    expect(execRecords[0]?.executionStatus).toBe('COMPLETED');
+    expect(execRecords[0]?.verificationResult).toBe('VERIFIED_SUCCESS');
+
     // 5. Record execution KPIs and budget tracking
     for (const task of executionResult.completedTasks) {
       kpiCalc.recordMetric({
@@ -183,5 +221,12 @@ describe('VIRTUAL MENDEZ EMPIRE — End-to-End Corporate Lifecycle (Phase 2)', (
     expect(boardReport.activeObjectivesCount).toBe(1);
     expect(boardReport.completedTasksCount).toBeGreaterThanOrEqual(2);
     expect(boardReport.departments).toHaveLength(9);
+    } finally {
+      try {
+        rmSync(testSandboxDir, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup error
+      }
+    }
   });
 });

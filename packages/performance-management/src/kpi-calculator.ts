@@ -7,6 +7,8 @@ export interface TaskExecutionMetric {
   durationMs: number;
   tokensUsed: number;
   costUsd: number;
+  taskComplexity?: number; // e.g. 1.0 (routine) to 3.0 (complex architecture)
+  qualityScore?: number; // 0.0 to 1.0 verified execution quality
   isSuccessful: boolean;
 }
 
@@ -24,6 +26,42 @@ export class KPICalculator {
 
   computeAgentKPI(agentId: string, agentName: string, departmentId: DepartmentId): AgentKPI {
     const metrics = this.agentMetrics.get(agentId) ?? [];
+    return this.calculateFromMetrics(agentId, agentName, departmentId, metrics);
+  }
+
+  computeAgentKPIFromEvents(
+    agentId: string,
+    agentName: string,
+    departmentId: DepartmentId,
+    events: Array<{
+      durationMs: number;
+      tokensUsed: number;
+      costUsd: number;
+      taskComplexity?: number;
+      qualityScore?: number;
+      isSuccessful: boolean;
+    }>
+  ): AgentKPI {
+    const metrics: TaskExecutionMetric[] = events.map((e) => ({
+      agentId,
+      agentName,
+      departmentId,
+      durationMs: e.durationMs,
+      tokensUsed: e.tokensUsed,
+      costUsd: e.costUsd,
+      taskComplexity: e.taskComplexity ?? 1.0,
+      qualityScore: e.qualityScore ?? (e.isSuccessful ? 1.0 : 0.0),
+      isSuccessful: e.isSuccessful,
+    }));
+    return this.calculateFromMetrics(agentId, agentName, departmentId, metrics);
+  }
+
+  private calculateFromMetrics(
+    agentId: string,
+    agentName: string,
+    departmentId: DepartmentId,
+    metrics: TaskExecutionMetric[]
+  ): AgentKPI {
     const tasksAssigned = metrics.length;
     if (tasksAssigned === 0) {
       return {
@@ -47,8 +85,19 @@ export class KPICalculator {
     const totalDuration = metrics.reduce((sum, m) => sum + m.durationMs, 0);
     const averageCycleTimeMs = totalDuration / tasksAssigned;
 
-    // Reliability factor: 0 - 60 points
-    const reliabilityScore = (tasksCompleted / tasksAssigned) * 60;
+    // Reliability & Quality factor (0 - 60 points) weighted by task complexity and execution quality
+    let totalWeightedQuality = 0;
+    let totalWeight = 0;
+
+    for (const m of metrics) {
+      const complexity = m.taskComplexity ?? 1.0;
+      const quality = m.qualityScore ?? (m.isSuccessful ? 1.0 : 0.0);
+      totalWeightedQuality += quality * complexity;
+      totalWeight += complexity;
+    }
+
+    const qualityRatio = totalWeight > 0 ? totalWeightedQuality / totalWeight : tasksCompleted / tasksAssigned;
+    const reliabilityScore = qualityRatio * 60;
 
     // Latency factor: 0 - 20 points (e.g. <= 2000ms is full 20 points)
     const latencyScore = Math.max(0, Math.min(20, 20 - (averageCycleTimeMs - 500) / 100));

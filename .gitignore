@@ -37,3 +37,12 @@ pnpm-debug.log*
 postgres-data/
 redis-data/
 
+# Review & Bundle Artifacts
+*.bundle
+*.patch
+*.zip
+*_LOG.txt
+GIT_COMMIT_HISTORY.txt
+PHASE2_REVIEW_GUIDE.md
+
+

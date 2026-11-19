@@ -228,19 +228,20 @@ flowchart TD
 
 ---
 
-### 2.12 Empire Autonomy Engine, CEO Orchestration & Tool Runtime (@vme/autonomy-engine)
+### 2.12 Empire Autonomy Engine, CEO Orchestration & Real Tool Runtime (@vme/autonomy-engine)
 - **Autonomous Work Lifecycle Coordination (`AutonomyCoordinator`):**
   - Ingests strategic directives, decomposes them into initiatives and task DAGs.
   - Assigns tasks to eligible departmental agents based on `DepartmentRegistry.listAgentRecordsByDepartment()` and `assertCapability()`.
   - Manages working memory scratchpads and executes routine tasks autonomously.
-  - Quarantines consequential outreach or trading tasks into the Owner authorization queue.
+  - Quarantines consequential actions via centralized policy classification (`ConsequentialPolicyEngine`) for Owner review.
   - Records execution outcomes into episodic institutional memory.
 - **CEO Orchestration Layer (`CEOOrchestrator`):**
   - Persona representing `EXEC-CEO` (`CEO_AutonomousDirector`).
   - Ingests Owner strategic directives (validating `OWNER_PRINCIPAL_ID`).
   - Dispatches initiatives to Department Directors and compiles Executive Board Reports for the Owner.
-- **Capability-Based Tool Runtime (`ToolExecutionRuntime`):**
-  - Domain tools with required capability tags (`job_market_scraping`, `fx_paper_trading`, `software_architecture`, `outreach_drafting`).
+- **Genuine Execution Adapters & Verifiable Runtime (`ToolExecutionRuntime`):**
+  - Real execution adapters: `RealFileSystemAdapter` (sandboxed file reads, writes, stats, directory listing), `RealTerminalCommandAdapter` (sandboxed subprocess execution with timeout and exit codes), and `RealHttpNetworkAdapter` (genuine HTTP/HTTPS requests).
+  - Verifiable task execution records (`TaskExecutionRecord`): captures exact start/completion timestamps, duration, invoked tool, authorized capability, exit/status codes, outputs, and artifact references into `task_execution_records`.
   - Agent and department capability verification (`hierarchy.assertCapability()`).
   - Cycle-safe parameter credential inspection (`assertNoRawCredentials()`).
   - Telemetry logging and emergency halt freezing.
@@ -248,10 +249,11 @@ flowchart TD
 ---
 
 ### 2.13 Corporate Performance Management & KPI Analytics (@vme/performance-management)
-- **Multi-Factor Agent KPI Scoring (`KPICalculator`):** Computes normalized performance scores (0-100) combining reliability (60%), latency (20%), and token efficiency (20%). Identifies and flags underperforming agents.
+- **Multi-Factor Agent KPI Scoring (`KPICalculator`):** Computes normalized performance scores (0-100) combining task complexity (1.0 to 3.0), verified execution quality (0.0 to 1.0), reliability (60%), latency (20%), and token efficiency (20%). Identifies and flags underperforming agents.
+- **Persistent Performance Event Store (`PerformanceEventStore`):** Stores event streams in `performance_events` and persistent reviews in `agent_performance_reviews`.
 - **Department Budget Oversight (`BudgetTracker`):** Tracks monthly expenditures, burn rate percentage, remaining budget, and spending ceiling limits against indicative department budgets.
 - **Evidence-Based Performance Reviews (`PerformanceReviewEngine`):**
-  - Synthesizes execution metrics into ratings: `EXCEEDS_EXPECTATIONS`, `MEETS_EXPECTATIONS`, `NEEDS_IMPROVEMENT`, `CRITICAL_CONCERN`.
+  - Synthesizes execution metrics and event streams into ratings: `EXCEEDS_EXPECTATIONS`, `MEETS_EXPECTATIONS`, `NEEDS_IMPROVEMENT`, `CRITICAL_CONCERN`.
   - Emits actionable improvement recommendations (`PROMPT_TUNING`, `WORKLOAD_REBALANCING`, `TOOL_TRAINING`, `SUPERVISOR_COACHING`).
   - **Governance Invariant:** AI evaluations produce recommendations only; they are strictly barred from executing unilateral dismissals, deactivations, or department transfers without Owner/Director authority.
 - **Department Health Analytics (`DepartmentAnalyticsEngine`):** Evaluates overall department success rate, active agents, budget burn rate, top performers, underperformers, and operational bottlenecks (latency >3000ms, budget critical burn >90%).
@@ -263,11 +265,12 @@ flowchart TD
   1. Owner submits Strategic Directive to CEO.
   2. CEO verifies Owner authority, decomposes directive into initiatives and tasks.
   3. Tasks are delegated to Department Directors and assigned to Specialists.
-  4. Routine tasks execute autonomously via Tool Execution Runtime with working memory scratchpads.
+  4. Routine tasks execute autonomously via Tool Execution Runtime with real execution adapters and working memory scratchpads.
   5. Consequential tasks are quarantined for Owner review.
   6. Owner explicitly authorizes quarantined consequential actions; AI self-approvals are rejected.
-  7. Execution outcomes and lessons are committed to Episodic Memory.
-  8. Task metrics and budget burn are recorded in Performance Management.
-  9. Evidence-based performance reviews and department health analytics are generated.
-  10. Executive Board Report is compiled by the CEO and presented to the Owner.
-- **Monorepo Build & Test Verification:** All 12 packages/services compile cleanly (`pnpm -r build`), and all 129 tests across 13 test files pass with 0 failures.
+  7. Pre-execution revalidation verifies cryptographic parameter hash integrity before any consequential execution.
+  8. Execution outcomes, artifacts, and lessons are committed to Episodic Memory.
+  9. Task metrics, complexity scores, and budget burn are recorded in Performance Management.
+  10. Evidence-based performance reviews and department health analytics are generated without mutating agent records.
+  11. Executive Board Report is compiled by the CEO and presented to the Owner.
+- **Monorepo Build & Test Verification:** All 12 packages/services compile cleanly (`pnpm -r build`), and all 156 tests across 17 test files pass with 0 failures.

@@ -8,7 +8,7 @@ import type {
 import type { DepartmentRegistry } from '@vme/department-hierarchy';
 import type { AgentRegistry } from '@vme/orchestrator';
 import type { EpisodicMemory, WorkingMemory } from '@vme/agent-memory';
-import type { DelegationManager } from '@vme/agent-communication';
+import type { DelegationManager, ConsequentialActionType } from '@vme/agent-communication';
 import type { EmergencySupervisor } from '@vme/security-governance';
 import { ObjectiveDecomposer, type RawObjectiveDirective } from './objective-decomposer.js';
 import type { ToolExecutionRuntime } from './tool-runtime.js';
@@ -72,19 +72,16 @@ export class AutonomyCoordinator {
     for (const task of executableTasks) {
       this.taskStore.set(task.id, task);
 
-      // Check Owner Authorization Boundaries for Consequential Actions
-      const isConsequential =
-        task.title.toLowerCase().includes('outreach') ||
-        task.title.toLowerCase().includes('trade') ||
-        Boolean(task.inputData['requiresApproval']);
+      // Centralized Policy-Based Consequential Action Classification
+      const consequentialClassification = this.classifyConsequentialAction(task);
 
-      if (isConsequential && task.title.toLowerCase().includes('outreach')) {
+      if (consequentialClassification) {
         const specialist = this.findAgentForTask(task);
         if (specialist) {
           this.delegationManager.interceptConsequentialAction(
             specialist.id,
             task.id,
-            'EXTERNAL_OUTREACH',
+            consequentialClassification,
             task.inputData
           );
         }
@@ -92,7 +89,8 @@ export class AutonomyCoordinator {
         task.status = 'WAITING_FEEDBACK';
         task.outputResult = {
           quarantined: true,
-          reason: 'Awaiting Owner explicit authorization before transmission',
+          actionType: consequentialClassification,
+          reason: 'Awaiting Owner explicit authorization before execution',
         };
         quarantinedForOwner.push(task);
         continue;
@@ -150,6 +148,29 @@ export class AutonomyCoordinator {
       completedTasks,
       quarantinedForOwner,
     };
+  }
+
+  private classifyConsequentialAction(task: OrchestratedTask): ConsequentialActionType | null {
+    if (task.inputData['consequentialActionType']) {
+      return task.inputData['consequentialActionType'] as ConsequentialActionType;
+    }
+    if (task.inputData['actionType'] === 'LIVE_TRADING' || task.inputData['actionType'] === 'EXTERNAL_OUTREACH') {
+      return task.inputData['actionType'] as ConsequentialActionType;
+    }
+    // Strategic classification based on corporate department mandate
+    if (
+      task.departmentId === 'opportunity_acquisition' &&
+      (task.title.toLowerCase().includes('outreach') || Boolean(task.inputData['requiresApproval']))
+    ) {
+      return 'EXTERNAL_OUTREACH';
+    }
+    if (
+      task.departmentId === 'financial_intelligence' &&
+      (task.title.toLowerCase().includes('trade') || task.title.toLowerCase().includes('transfer'))
+    ) {
+      return 'LIVE_TRADING';
+    }
+    return null;
   }
 
   private findAgentForTask(task: { departmentId: any }): AgentSpec | null {

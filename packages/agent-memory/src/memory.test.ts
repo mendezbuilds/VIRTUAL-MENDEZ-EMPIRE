@@ -626,6 +626,10 @@ describe('@vme/agent-memory Quad-Tier Persistent Memory Engine', () => {
           synthesizedContent: 'Always modify indemnity clause in cross-border software contracts.',
           embedding: [0.7, 0.3],
           tags: ['legal', 'contracts'],
+          provenance: 'Consolidated from contract renegotiation task executions',
+          evidenceSummary: 'High value contract terms successfully negotiated',
+          confidenceScore: 0.95,
+          policy: { minSourceRecordCount: 1 },
           principal: activeSpecialist,
         })
       ).rejects.toThrow(UnauthorizedMemoryAccessError);
@@ -640,6 +644,10 @@ describe('@vme/agent-memory Quad-Tier Persistent Memory Engine', () => {
         synthesizedContent: 'Always modify indemnity clause in cross-border software contracts.',
         embedding: [0.7, 0.3],
         tags: ['legal', 'contracts'],
+        provenance: 'Consolidated from contract renegotiation task executions',
+        evidenceSummary: 'High value contract terms successfully negotiated',
+        confidenceScore: 0.95,
+        policy: { minSourceRecordCount: 1 },
         principal: ceoPrincipal,
       });
 

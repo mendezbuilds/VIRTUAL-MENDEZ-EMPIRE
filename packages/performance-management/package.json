@@ -17,12 +17,14 @@
     "clean": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\""
   },
   "dependencies": {
-    "@vme/shared-types": "workspace:*",
     "@vme/department-hierarchy": "workspace:*",
+    "@vme/shared-types": "workspace:*",
+    "pg": "^8.23.1",
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@types/pg": "^8.23.1",
+    "pg-mem": "^3.0.14",
     "typescript": "^5.7.3"
   }
 }
-

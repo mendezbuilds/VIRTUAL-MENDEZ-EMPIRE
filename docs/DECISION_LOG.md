@@ -270,3 +270,56 @@
   4. **Phase 2 End-to-End Multi-Agent Corporate Lifecycle (`e2e-corporate-lifecycle.test.ts`):**
      - Validates full monorepo corporate workflow: Owner directive ingestion -> CEO decomposition -> Director delegation -> Routine specialist execution with tool runtime & working memory -> Consequential action quarantine -> Owner authorization verification -> Episodic memory recording -> KPI tracking & budget burn update -> Performance review generation -> Department health analytics -> Executive Board Report presentation.
 - **Consequences:** Delivers a fully operational, integrated, verified, and self-governing AI corporate workforce ready for Phase 3. Verified across all 13 test suites (129 passing tests).
+
+---
+
+## ADR-017: Real Persistent PostgreSQL Storage, Dual-Layer Database-Level ABAC & Migration Schemas (M2.3 Remediation)
+- **Status:** APPROVED & IMPLEMENTED
+- **Context:** Independent audit required genuine persistent infrastructure for Agent Memory with database-level Row-Level Security (RLS) and Attribute-Based Access Control (ABAC), eliminating silent in-memory fallbacks in production.
+- **Decision:**
+  1. **Dual-Layer Defense:** Enforces ABAC in TypeScript (`MemoryAccessController`) and in PostgreSQL (`002_agent_memory_schema.sql`) using session context variables (`app.current_tenant_id`, `app.current_agent_id`, `app.current_department_id`, `app.current_principal_level`) and RLS policies. Queries without tenant context fail closed.
+  2. **Production Fail-Safe Mode:** `AgentMemoryEngine` operating in `PRODUCTION_POSTGRES` mode strictly requires a PostgreSQL connection pool (`pg.Pool`). Missing pools throw `PostgresStorageError`; silent fallback to in-memory is disabled.
+  3. **Multi-Provider, Flexible Vector Dimensions:** Uses `DOUBLE PRECISION[]` with custom immutable `cosine_similarity_array(a, b)` function to avoid fixed 1536-dimension limits, with `assertEmbeddingCompatibility` enforcing dimension, provider, and model consistency.
+  4. **Evidence-Based Consolidation Policy:** `MemoryConsolidator` enforces `minSourceRecordCount`, `minAverageImportanceScore`, and `minConfidenceScore`, keeping procedural playbooks as unexecuted guidance until explicitly authorized.
+- **Consequences:** Delivers true enterprise persistence, strict data isolation, and auditable memory governance. Verified with 20 tests in `@vme/agent-memory`.
+
+---
+
+## ADR-018: Durable PostgreSQL Messaging Broker, Dead-Letter Exponential Backoff & Message Recovery (M2.4 Remediation)
+- **Status:** APPROVED & IMPLEMENTED
+- **Context:** Independent audit required production message durability, preventing in-memory message loss across worker crashes, with transactional state tracking, dead-letter routing, and exponential backoff retry.
+- **Decision:**
+  1. **PostgreSQL-Backed Message Queue:** Implemented `PostgresMessageStorage` backed by `agent_communication_envelopes`, `message_delivery_acknowledgments`, and `message_dead_letter_queue` from `003_durable_communication_and_execution.sql`.
+  2. **Simulated Worker Crash Recovery:** `MessageRouter.recoverPendingMessages()` retrieves undelivered or pending retry messages upon service initialization to restore agent inboxes and delivery states.
+  3. **Exponential Backoff Retry:** Dead-lettered or transiently failing messages schedule retries at `sentAt + baseInterval * 2^retryCount`, halting and routing permanently to DLQ when `maxRetries` is reached.
+  4. **Fail-Closed Mode:** In `PRODUCTION_POSTGRES` mode, `MessageRouter` requires `PostgresMessageStorage`, preventing unpersisted message loss.
+- **Consequences:** Guarantees message delivery across process crashes and network partitions. Verified with 16 tests in `@vme/agent-communication`.
+
+---
+
+## ADR-019: Cryptographic Consequential Action Lifecycle, Parameter Hashing & Pre-Execution Revalidation (M2.4 / M2.5 Remediation)
+- **Status:** APPROVED & IMPLEMENTED
+- **Context:** Fragile keyword/substring pattern matching (`task.title.includes('outreach')`) was replaced with an authoritative, centralized Consequential Action Policy Engine enforcing a strict 10-step lifecycle and cryptographic parameter binding.
+- **Decision:**
+  1. **Centralized Classification:** `ConsequentialPolicyEngine` explicitly classifies actions into `LIVE_TRADING`, `CAPITAL_TRANSFER`, `EXTERNAL_OUTREACH`, `BINDING_CONTRACT`, `GOVERNANCE_OVERRIDE`, and `INFRASTRUCTURE_MUTATION`.
+  2. **Cryptographic SHA-256 Parameter Hashing:** Every quarantined action generates a deterministic SHA-256 hash (`parameter_hash`) of normalized arguments, bound to an expiration window (`valid_until`) and stored in `consequential_authorization_requests`.
+  3. **Sole Owner Authority:** Only the authentic Owner principal (`OWNER_PRINCIPAL_ID`) can approve or reject consequential requests. AI agents (including `EXEC-CEO`) attempting approval throw `UnauthorizedOwnerDecisionError`.
+  4. **Pre-Execution Revalidation:** Before execution, the adapter re-computes the parameter hash against the execution payload and checks expiration. Any parameter tampering or expired window throws `ConsequentialPolicyViolationError`.
+  5. **Audit Evidence:** Completed executions store verifiable evidence, timestamps, and execution results.
+- **Consequences:** Eliminates unauthorized actions, parameter tampering, and self-approvals. Verified in `@vme/agent-communication` and `@vme/autonomy-engine`.
+
+---
+
+## ADR-020: Genuine Execution Adapters, Verifiable Task Execution Records & Evidence-Based Performance Event Persistence (M2.5 / M2.6 Remediation)
+- **Status:** APPROVED & IMPLEMENTED
+- **Context:** Substituted simulated mock outputs with genuine execution adapters, verifiable task execution records, and persistent performance events grounded in real execution data.
+- **Decision:**
+  1. **Real Execution Adapters:**
+     - `RealFileSystemAdapter`: Performs real sandboxed file reads, writes, stats, lists, and existence checks; strictly bars path traversal outside workspace (`ExecutionSandboxError`).
+     - `RealTerminalCommandAdapter`: Executes real subprocesses via `child_process.execFile` with timeout controls, capturing real exit codes, stdout, stderr, and duration.
+     - `RealHttpNetworkAdapter`: Dispatches genuine HTTP/HTTPS requests with `fetch` and timeout abort signals.
+  2. **Verifiable Task Execution Records:** `TaskExecutionRecorder` captures exact start/completion timestamps, duration, invoked tool, authorized capability, exit/status codes, outputs, and artifact references into `task_execution_records`.
+  3. **Complexity & Quality Weighted KPIs:** `KPICalculator` weights reliability scores by task complexity (1.0 to 3.0) and verified execution quality (0.0 to 1.0), tracking tokens and cost.
+  4. **Persistent Performance Event Store:** `PerformanceEventStore` stores event streams in `performance_events` and reviews in `agent_performance_reviews`.
+  5. **Strict Non-Mutation Invariant:** Performance reviews generate actionable recommendations only; they are strictly barred from mutating agent records, departments, tiers, supervisors, or canonical identities.
+- **Consequences:** Provides concrete operational evidence, real execution sandboxing, and non-destructive performance management. Verified across all 156 monorepo tests.
