@@ -19,6 +19,7 @@ import {
 import {
   DepartmentLeadershipManager,
   type LeadershipAppointmentRecord,
+  type AppointDirectorParams,
 } from './leadership-manager.js';
 import {
   DepartmentTransferCoordinator,
@@ -29,6 +30,15 @@ import {
   OrganizationalAuditor,
   type AuditReport,
 } from './organizational-auditor.js';
+import {
+  ExecutiveAuthenticationService,
+  type ExecutiveAuthenticatedSession,
+  getHierarchyAuthoritySecret,
+} from './hierarchy-authorizer.js';
+import {
+  OwnerAuthenticationService,
+  type OwnerAuthenticatedSession,
+} from '@vme/security-governance';
 
 export { UnauthorizedHierarchyActionError };
 
@@ -42,12 +52,18 @@ export class DepartmentRegistry {
   private readonly leadershipManager: DepartmentLeadershipManager;
   private readonly transferCoordinator: DepartmentTransferCoordinator;
   private readonly auditor: OrganizationalAuditor;
+  public readonly ownerAuthService: OwnerAuthenticationService;
+  public readonly executiveAuthService: ExecutiveAuthenticationService;
 
   constructor(
     customDepartments: Department[] = INITIAL_DEPARTMENTS,
     customWorkforce: AgentRecord[] | AgentSpec[] = INITIAL_AGENT_RECORDS,
-    private readonly emergencySupervisor?: EmergencySupervisor
+    private readonly emergencySupervisor?: EmergencySupervisor,
+    ownerAuthService?: OwnerAuthenticationService,
+    executiveAuthService?: ExecutiveAuthenticationService
   ) {
+    this.ownerAuthService = ownerAuthService ?? new OwnerAuthenticationService();
+    this.executiveAuthService = executiveAuthService ?? new ExecutiveAuthenticationService();
     // 1. Populate departments
     for (const dept of customDepartments) {
       this.departments.set(dept.id, {
@@ -146,9 +162,70 @@ export class DepartmentRegistry {
     // 3. Initialize sub-engines
     this.tree = new HierarchyTree(Array.from(this.agents.values()));
     this.delegationEngine = new DelegationRuleEngine();
-    this.leadershipManager = new DepartmentLeadershipManager(this.departments, this.agents);
-    this.transferCoordinator = new DepartmentTransferCoordinator(this.departments, this.agents, this.tree);
+    this.leadershipManager = new DepartmentLeadershipManager(
+      this.departments,
+      this.agents,
+      this.ownerAuthService,
+      this.executiveAuthService
+    );
+    this.transferCoordinator = new DepartmentTransferCoordinator(
+      this.departments,
+      this.agents,
+      this.tree,
+      this.ownerAuthService,
+      this.executiveAuthService
+    );
     this.auditor = new OrganizationalAuditor();
+  }
+
+  // =========================================================================
+  // Authenticated Session Helper Methods
+  // =========================================================================
+
+  /**
+   * Generates a verified, cryptographically signed Owner session.
+   * Requires authentic Owner credentials.
+   */
+  createOwnerSession(params: {
+    principalId: string;
+    email?: string;
+    credentials?: string;
+    reason?: string;
+    sessionDurationMs?: number;
+  }): OwnerAuthenticatedSession {
+    return this.ownerAuthService.createOwnerSession({
+      principalId: params.principalId,
+      email: params.email ?? 'stephenikeme@icloud.com',
+      credentials: params.credentials ?? process.env.OWNER_AUTH_CREDENTIALS ?? 'vme-owner-credentials-test-2026',
+      reason: params.reason,
+      sessionDurationMs: params.sessionDurationMs,
+    });
+  }
+
+  /**
+   * Generates a verified, cryptographically signed Executive session.
+   * Requires authentic registered executive identity in executive_office.
+   */
+  createExecutiveSession(agentIdOrCode: string, sessionDurationMs?: number): ExecutiveAuthenticatedSession {
+    return this.executiveAuthService.createExecutiveSession(
+      { agentIdOrCode, sessionDurationMs },
+      this.agents,
+      getHierarchyAuthoritySecret()
+    );
+  }
+
+  /**
+   * Revokes an active Owner session.
+   */
+  revokeOwnerSession(sessionId: string, reason?: string): void {
+    this.ownerAuthService.revokeSession(sessionId, reason);
+  }
+
+  /**
+   * Revokes an active Executive session.
+   */
+  revokeExecutiveSession(sessionId: string, reason?: string): void {
+    this.executiveAuthService.revokeSession(sessionId, reason);
   }
 
   // =========================================================================
@@ -278,13 +355,7 @@ export class DepartmentRegistry {
    * Appoints a Director for a corporate department.
    * Blocked during emergency circuit breaker halts.
    */
-  appointDirector(params: {
-    departmentId: DepartmentId;
-    newDirectorIdOrCode: string;
-    authorizedBy: string;
-    reason: string;
-    effectiveDate?: string;
-  }): LeadershipAppointmentRecord {
+  appointDirector(params: AppointDirectorParams): LeadershipAppointmentRecord {
     // Assert operational state: organizational mutations blocked during emergency halts
     if (this.emergencySupervisor) {
       this.emergencySupervisor.assertOperational();

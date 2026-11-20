@@ -15,12 +15,19 @@ import {
   INITIAL_AGENT_RECORDS,
   cloneFoundingWorkforce,
   cloneCanonicalDepartments,
+  getHierarchyAuthoritySecret,
 } from './index.js';
 
 describe('@vme/department-hierarchy Corporate Structure & Workforce', () => {
   let registry: DepartmentRegistry;
+  const testDbSecret = 'vme-hierarchy-authority-test-secret-32b-entropy';
+  const testOwnerSecret = 'vme-hierarchy-owner-test-secret-32b-entropy';
+  const testOwnerCredentials = 'vme-test-owner-master-cryptographic-credentials-2026';
 
   beforeEach(() => {
+    process.env.DB_SESSION_SECRET = testDbSecret;
+    process.env.OWNER_AUTH_SECRET = testOwnerSecret;
+    process.env.OWNER_AUTH_CREDENTIALS = testOwnerCredentials;
     registry = new DepartmentRegistry();
   });
 
@@ -323,10 +330,10 @@ describe('@vme/department-hierarchy Corporate Structure & Workforce', () => {
   // 5. Leadership Governance & Tiered Director Appointments
   // =========================================================================
   describe('5. Leadership Governance & Tiered Director Appointments', () => {
-    it('enforces Owner-only authority for Executive Office appointments', () => {
+    it('enforces Owner-only authority for Executive Office appointments and rejects identity strings alone', () => {
       const coo = registry.getAgentRecord('EXEC-COO')!;
 
-      // 1. Canonical Executive CEO cannot appoint Executive Office leadership
+      // 1. Supplying only 'EXEC-CEO' string cannot authorize an appointment
       expect(() =>
         registry.appointDirector({
           departmentId: 'executive_office',
@@ -334,37 +341,66 @@ describe('@vme/department-hierarchy Corporate Structure & Workforce', () => {
           authorizedBy: 'EXEC-CEO',
           reason: 'Promote COO to Co-Director',
         })
-      ).toThrow("lacks authority to appoint director for 'executive_office'");
+      ).toThrow(/Supplying only 'EXEC-CEO' cannot authorize an appointment or transfer/i);
 
-      // 2. Human Owner principal strictly succeeds for Executive Office appointment
+      // 2. Supplying only the Owner ID string cannot authorize an appointment
+      expect(() =>
+        registry.appointDirector({
+          departmentId: 'executive_office',
+          newDirectorIdOrCode: 'EXEC-COO',
+          authorizedBy: OWNER_PRINCIPAL_ID,
+          reason: 'Owner appointed executive leadership reassignment',
+        })
+      ).toThrow(/Supplying only the Owner ID cannot authorize an appointment or transfer/i);
+
+      // 3. Authenticated CEO session attempting Executive Office appointment fails authority check
+      const execCeoSession = registry.createExecutiveSession('EXEC-CEO');
+      expect(() =>
+        registry.appointDirector({
+          departmentId: 'executive_office',
+          newDirectorIdOrCode: 'EXEC-COO',
+          executiveSession: execCeoSession,
+          reason: 'Promote COO to Co-Director',
+        })
+      ).toThrow(/Executive Office leadership appointments strictly require human Owner authorization/i);
+
+      // 4. Human Owner principal with verified Owner session strictly succeeds for Executive Office appointment
+      const ownerSession = registry.createOwnerSession({
+        principalId: OWNER_PRINCIPAL_ID,
+        email: 'stephenikeme@icloud.com',
+        credentials: testOwnerCredentials,
+      });
+
       const result = registry.appointDirector({
         departmentId: 'executive_office',
         newDirectorIdOrCode: 'EXEC-COO',
-        authorizedBy: OWNER_PRINCIPAL_ID,
+        ownerSession,
         reason: 'Owner appointed executive leadership reassignment',
         effectiveDate: '2026-03-01T00:00:00.000Z',
       });
 
       expect(result.newDirectorCode).toBe('EXEC-COO');
       expect(result.appointedBy).toBe(OWNER_PRINCIPAL_ID);
+      expect(result.authorizationSignature).toBeDefined();
       expect(registry.getDepartmentDirector('executive_office')?.name).toBe(coo.displayName);
     });
 
-    it('allows both Owner and canonical Executive CEO to appoint functional department directors', () => {
-      // 1. CEO appoints new Director for Marketing & Growth
-      // We'll promote/appoint an existing Director or Executive (e.g. BIZ-DIR or another Director)
+    it('allows both Owner and canonical Executive CEO to appoint functional department directors with verified sessions', () => {
       const bizDir = registry.getAgentRecord('BIZ-DIR')!;
+      const ceoSession = registry.createExecutiveSession('EXEC-CEO');
 
+      // 1. CEO with verified session appoints new Director for Marketing & Growth
       const appointment = registry.appointDirector({
         departmentId: 'marketing_growth',
         newDirectorIdOrCode: 'BIZ-DIR',
-        authorizedBy: 'EXEC-CEO',
+        executiveSession: ceoSession,
         reason: 'Strategic leadership rotation to Marketing',
         effectiveDate: '2026-02-15T00:00:00.000Z',
       });
 
       expect(appointment.newDirectorCode).toBe('BIZ-DIR');
       expect(appointment.previousDirectorCode).toBe('MKT-DIR');
+      expect(appointment.authorizationSignature).toBeDefined();
       expect(registry.getDepartmentDirector('marketing_growth')?.name).toBe(bizDir.displayName);
 
       // 2. History is recorded and deep-frozen
@@ -372,22 +408,23 @@ describe('@vme/department-hierarchy Corporate Structure & Workforce', () => {
       expect(history).toHaveLength(1);
       expect(Object.isFrozen(history[0])).toBe(true);
 
-      // 3. Non-executive role (e.g. TECH-QA) attempting appointment is rejected
+      // 3. Non-CEO executive role (e.g. EXEC-COO) attempting appointment is rejected
+      const cooSession = registry.createExecutiveSession('EXEC-COO');
       expect(() =>
         registry.appointDirector({
           departmentId: 'marketing_growth',
           newDirectorIdOrCode: 'BIZ-DIR',
-          authorizedBy: 'TECH-QA',
+          executiveSession: cooSession,
           reason: 'Illegal appointment attempt',
         })
-      ).toThrow("lacks authority to appoint director for 'marketing_growth'");
+      ).toThrow(/Executive 'EXEC-COO' lacks authority to appoint directors/i);
 
       // 4. Attempting to appoint a Specialist without Director level fails seniority validation
       expect(() =>
         registry.appointDirector({
           departmentId: 'marketing_growth',
           newDirectorIdOrCode: 'TECH-FSE',
-          authorizedBy: 'EXEC-CEO',
+          executiveSession: ceoSession,
           reason: 'Premature promotion attempt',
         })
       ).toThrow("Seniority violation: agent TECH-FSE has level 'SPECIALIST', expected 'DIRECTOR' or 'EXECUTIVE'");
@@ -405,11 +442,12 @@ describe('@vme/department-hierarchy Corporate Structure & Workforce', () => {
 
       // Transfer TECH-FSE to opportunity_acquisition
       const oppDir = registry.getAgentRecord('OPP-DIR')!;
+      const ceoSession = registry.createExecutiveSession('EXEC-CEO');
       const updatedAgent = registry.transferAgent({
         agentIdOrCode: 'TECH-FSE',
         toDepartmentId: 'opportunity_acquisition',
         reason: 'Transfer to Opportunity Acquisition technical scouting',
-        authorizedBy: 'EXEC-CEO',
+        executiveSession: ceoSession,
         newJobTitle: 'Opportunity Technical Evaluator',
         newVersion: '1.1.0',
         effectiveDate: '2026-02-01T00:00:00.000Z',
@@ -450,25 +488,58 @@ describe('@vme/department-hierarchy Corporate Structure & Workforce', () => {
     });
 
     it('rejects transfers authorized by unauthorized principals or with invalid departments', () => {
+      const ceoSession = registry.createExecutiveSession('EXEC-CEO');
+
       // 1. Unknown destination department
       expect(() =>
         registry.transferAgent({
           agentIdOrCode: 'TECH-FSE',
           toDepartmentId: 'non_existent_department' as any,
           reason: 'Invalid department transfer',
-          authorizedBy: 'EXEC-CEO',
+          executiveSession: ceoSession,
         })
       ).toThrow("Unknown destination department 'non_existent_department'");
 
-      // 2. Unauthorized authorizer (Specialist)
+      // 2. Supplying only 'EXEC-CEO' string
       expect(() =>
         registry.transferAgent({
           agentIdOrCode: 'TECH-FSE',
           toDepartmentId: 'opportunity_acquisition',
-          reason: 'Unauthorized transfer attempt',
-          authorizedBy: 'TECH-QA',
+          reason: 'String attempt',
+          authorizedBy: 'EXEC-CEO',
         })
-      ).toThrow('lacks executive or Owner transfer authorization authority');
+      ).toThrow(/Supplying only 'EXEC-CEO' cannot authorize an appointment or transfer/i);
+
+      // 3. Supplying only Owner ID string
+      expect(() =>
+        registry.transferAgent({
+          agentIdOrCode: 'TECH-FSE',
+          toDepartmentId: 'opportunity_acquisition',
+          reason: 'Owner string attempt',
+          authorizedBy: OWNER_PRINCIPAL_ID,
+        })
+      ).toThrow(/Supplying only the Owner ID cannot authorize an appointment or transfer/i);
+
+      // 4. Executive attempting transfer into executive_office rejected
+      expect(() =>
+        registry.transferAgent({
+          agentIdOrCode: 'TECH-FSE',
+          toDepartmentId: 'executive_office',
+          reason: 'Executive office transfer attempt',
+          executiveSession: ceoSession,
+        })
+      ).toThrow(/Transfers involving Executive Office strictly require human Owner authorization/i);
+
+      // 5. Non-CEO executive attempting transfer rejected
+      const cooSession = registry.createExecutiveSession('EXEC-COO');
+      expect(() =>
+        registry.transferAgent({
+          agentIdOrCode: 'TECH-FSE',
+          toDepartmentId: 'opportunity_acquisition',
+          reason: 'COO transfer attempt',
+          executiveSession: cooSession,
+        })
+      ).toThrow(/Executive 'EXEC-COO' lacks authority to authorize department transfers/i);
     });
   });
 
@@ -520,6 +591,7 @@ describe('@vme/department-hierarchy Corporate Structure & Workforce', () => {
           departmentId: 'marketing_growth',
           newDirectorIdOrCode: 'BIZ-DIR',
           authorizedBy: 'EXEC-CEO',
+          executiveSession: securedRegistry.createExecutiveSession('EXEC-CEO'),
           reason: 'Pre-emergency rotation',
         }).newDirectorCode
       ).toBe('BIZ-DIR');
@@ -534,6 +606,7 @@ describe('@vme/department-hierarchy Corporate Structure & Workforce', () => {
           departmentId: 'marketing_growth',
           newDirectorIdOrCode: 'MKT-DIR',
           authorizedBy: 'EXEC-CEO',
+          executiveSession: securedRegistry.createExecutiveSession('EXEC-CEO'),
           reason: 'Post-emergency recovery attempt',
         })
       ).toThrow(EmergencyHaltError);
@@ -544,6 +617,7 @@ describe('@vme/department-hierarchy Corporate Structure & Workforce', () => {
           toDepartmentId: 'opportunity_acquisition',
           reason: 'Emergency transfer attempt',
           authorizedBy: 'EXEC-CEO',
+          executiveSession: securedRegistry.createExecutiveSession('EXEC-CEO'),
         })
       ).toThrow(EmergencyHaltError);
 
@@ -563,9 +637,166 @@ describe('@vme/department-hierarchy Corporate Structure & Workforce', () => {
           departmentId: 'marketing_growth',
           newDirectorIdOrCode: 'BIZ-DIR',
           authorizedBy: OWNER_PRINCIPAL_ID,
+          ownerSession: securedRegistry.createOwnerSession({
+            principalId: OWNER_PRINCIPAL_ID,
+            reason: 'Post-resolution leadership restoration',
+          }),
           reason: 'Post-resolution leadership restoration',
         }).newDirectorCode
       ).toBe('BIZ-DIR');
+    });
+  });
+
+  // =========================================================================
+  // 9. Cryptographic Hierarchy Authorization & Secret Enforcement
+  // =========================================================================
+  describe('9. Cryptographic Hierarchy Authorization & Secret Enforcement', () => {
+    it('strictly rejects hierarchy operations authorized by identity strings alone', () => {
+      const authRegistry = new DepartmentRegistry();
+
+      // Attempt appointDirector with only EXEC-CEO string
+      expect(() =>
+        authRegistry.appointDirector({
+          departmentId: 'marketing_growth',
+          newDirectorIdOrCode: 'BIZ-DIR',
+          authorizedBy: 'EXEC-CEO',
+          reason: 'Unauthenticated string attempt',
+        })
+      ).toThrow(/cannot authorize an appointment or transfer|verified.*authentication/i);
+
+      // Attempt appointDirector with only OWNER_PRINCIPAL_ID string
+      expect(() =>
+        authRegistry.appointDirector({
+          departmentId: 'marketing_growth',
+          newDirectorIdOrCode: 'BIZ-DIR',
+          authorizedBy: OWNER_PRINCIPAL_ID,
+          reason: 'Unauthenticated owner string attempt',
+        })
+      ).toThrow(/cannot authorize an appointment or transfer|verified.*authentication/i);
+
+      // Attempt transferAgent with only EXEC-CEO string
+      expect(() =>
+        authRegistry.transferAgent({
+          agentIdOrCode: 'TECH-FSE',
+          toDepartmentId: 'marketing_growth',
+          authorizedBy: 'EXEC-CEO',
+          reason: 'Unauthenticated transfer attempt',
+        })
+      ).toThrow(/cannot authorize an appointment or transfer|verified.*authentication/i);
+
+      // Attempt transferAgent with only OWNER_PRINCIPAL_ID string
+      expect(() =>
+        authRegistry.transferAgent({
+          agentIdOrCode: 'TECH-FSE',
+          toDepartmentId: 'marketing_growth',
+          authorizedBy: OWNER_PRINCIPAL_ID,
+          reason: 'Unauthenticated owner transfer attempt',
+        })
+      ).toThrow(/cannot authorize an appointment or transfer|verified.*authentication/i);
+    });
+
+    it('rejects missing, invalid, expired, or revoked authentication sessions', () => {
+      const authRegistry = new DepartmentRegistry();
+
+      // Tampered session token
+      const legitSession = authRegistry.createExecutiveSession('EXEC-CEO');
+      const tamperedSession = {
+        ...legitSession,
+        token: legitSession.token.slice(0, -6) + 'abcdef',
+      };
+
+      expect(() =>
+        authRegistry.appointDirector({
+          departmentId: 'marketing_growth',
+          newDirectorIdOrCode: 'BIZ-DIR',
+          authorizedBy: 'EXEC-CEO',
+          executiveSession: tamperedSession,
+          reason: 'Tampered session token',
+        })
+      ).toThrow(/signature verification failed/i);
+
+      // Revoked executive session
+      authRegistry.revokeExecutiveSession(legitSession.sessionId, 'Security test revocation');
+      expect(() =>
+        authRegistry.appointDirector({
+          departmentId: 'marketing_growth',
+          newDirectorIdOrCode: 'BIZ-DIR',
+          authorizedBy: 'EXEC-CEO',
+          executiveSession: legitSession,
+          reason: 'Revoked session attempt',
+        })
+      ).toThrow(/has been revoked/i);
+
+      // Revoked owner session
+      const ownerSession = authRegistry.createOwnerSession({
+        principalId: OWNER_PRINCIPAL_ID,
+      });
+      authRegistry.revokeOwnerSession(ownerSession.sessionId, 'Revocation test');
+      expect(() =>
+        authRegistry.appointDirector({
+          departmentId: 'marketing_growth',
+          newDirectorIdOrCode: 'BIZ-DIR',
+          authorizedBy: OWNER_PRINCIPAL_ID,
+          ownerSession,
+          reason: 'Revoked owner attempt',
+        })
+      ).toThrow(/has been revoked/i);
+    });
+
+    it('ensures failed authorization leaves hierarchy records and ledgers completely unmutated', () => {
+      const authRegistry = new DepartmentRegistry();
+      const initialDirector = authRegistry.getDepartmentDirectorRecord('marketing_growth')!.agentCode;
+      const initialLeadershipLen = authRegistry.getLeadershipHistory().length;
+      const initialAgentDept = authRegistry.getAgentRecord('TECH-FSE')!.departmentId;
+      const initialTransferLen = authRegistry.getTransferHistory().length;
+
+      // Failed appointment attempt
+      expect(() =>
+        authRegistry.appointDirector({
+          departmentId: 'marketing_growth',
+          newDirectorIdOrCode: 'BIZ-DIR',
+          authorizedBy: 'EXEC-CEO',
+          // no session
+          reason: 'Must fail',
+        })
+      ).toThrow(UnauthorizedHierarchyActionError);
+
+      // Verify no appointment mutation occurred
+      expect(authRegistry.getDepartmentDirectorRecord('marketing_growth')!.agentCode).toBe(initialDirector);
+      expect(authRegistry.getLeadershipHistory()).toHaveLength(initialLeadershipLen);
+
+      // Failed transfer attempt
+      expect(() =>
+        authRegistry.transferAgent({
+          agentIdOrCode: 'TECH-FSE',
+          toDepartmentId: 'marketing_growth',
+          authorizedBy: 'EXEC-CEO',
+          // no session
+          reason: 'Must fail',
+        })
+      ).toThrow(UnauthorizedHierarchyActionError);
+
+      // Verify no transfer mutation occurred
+      expect(authRegistry.getAgentRecord('TECH-FSE')!.departmentId).toBe(initialAgentDept);
+      expect(authRegistry.getTransferHistory()).toHaveLength(initialTransferLen);
+    });
+
+    it('enforces that missing or invalid DB_SESSION_SECRET fails closed without fallback', () => {
+      const originalSecret = process.env.DB_SESSION_SECRET;
+      try {
+        delete process.env.DB_SESSION_SECRET;
+
+        // Missing DB_SESSION_SECRET prevents signing and fails closed without fallback
+        expect(() => {
+          registry.createExecutiveSession('EXEC-CEO');
+        }).toThrow(/DB_SESSION_SECRET.*must be independently provisioned/i);
+
+        expect(() => {
+          getHierarchyAuthoritySecret();
+        }).toThrow(/DB_SESSION_SECRET.*must be independently provisioned/i);
+      } finally {
+        process.env.DB_SESSION_SECRET = originalSecret;
+      }
     });
   });
 });

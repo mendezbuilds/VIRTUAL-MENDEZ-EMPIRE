@@ -9,7 +9,7 @@ import {
   OWNER_PRINCIPAL_ID,
   CANONICAL_OWNER_PRINCIPAL,
 } from '@vme/shared-types';
-import { DepartmentRegistry } from '@vme/department-hierarchy';
+import { DepartmentRegistry, UnauthorizedHierarchyActionError } from '@vme/department-hierarchy';
 import {
   MessageRouter,
   PostgresMessageStorage,
@@ -69,11 +69,11 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
   const ownerMasterKey = 'vme-owner-secure-cryptographic-master-key-2026';
 
   beforeAll(async () => {
-    canonicalRegistry = new DepartmentRegistry();
     const dynamicDbSecret = randomBytes(32).toString('hex');
     process.env.DB_SESSION_SECRET = dynamicDbSecret;
     process.env.OWNER_AUTH_SECRET = ownerHmacSecret;
     process.env.OWNER_AUTH_CREDENTIALS = ownerMasterKey;
+    canonicalRegistry = new DepartmentRegistry();
     testSandboxDir = mkdtempSync(join(tmpdir(), 'vme-pg-genuine-test-'));
 
     // Initialize admin pool and assert genuine PostgreSQL is reachable
@@ -2091,6 +2091,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
           toDepartmentId: 'operations_administration',
           reason: 'Legitimate temporary operations transfer',
           authorizedBy: 'EXEC-CEO',
+          executiveSession: freshRegistry.createExecutiveSession('EXEC-CEO'),
         });
 
         const legitTransfer = transferredArch.currentConfig.departmentTransferHistory[0]!;
@@ -2313,6 +2314,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
           departmentId: 'operations_administration',
           newDirectorIdOrCode: 'OPS-DIR',
           authorizedBy: 'EXEC-CEO',
+          executiveSession: dirRegistry.createExecutiveSession('EXEC-CEO'),
           reason: 'Authorized CEO confirmation of Director',
         });
         expect(appt.authorizationSignature).toBeDefined();
@@ -2346,6 +2348,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
           agentIdOrCode: 'TECH-FSE',
           toDepartmentId: 'operations_administration',
           authorizedBy: 'EXEC-CEO',
+          executiveSession: transferRegistry.createExecutiveSession('EXEC-CEO'),
           reason: 'Authorized CEO transfer to Operations',
         });
         expect(transferredFse.departmentId).toBe('operations_administration');
@@ -2376,6 +2379,291 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         await clearAuthenticatedSession(client);
       } finally {
         client.release();
+      }
+    });
+
+    // =========================================================================
+    // 11. Authenticated Hierarchy Authorization & Secret Enforcement under vme_app
+    // =========================================================================
+    it('11a. proves supplying only Owner ID or EXEC-CEO string cannot authorize hierarchy mutations', async () => {
+      const client = await appPool.connect();
+      try {
+        const testRegistry = new DepartmentRegistry();
+
+        // 1. Attempt appointDirector with only OWNER_PRINCIPAL_ID string
+        expect(() =>
+          testRegistry.appointDirector({
+            departmentId: 'marketing_growth',
+            newDirectorIdOrCode: 'BIZ-DIR',
+            authorizedBy: OWNER_PRINCIPAL_ID,
+            reason: 'Adversary string-only Owner appointment attempt',
+          })
+        ).toThrow(/cannot authorize an appointment or transfer|verified.*authentication/i);
+
+        // 2. Attempt transferAgent with only OWNER_PRINCIPAL_ID string
+        expect(() =>
+          testRegistry.transferAgent({
+            agentIdOrCode: 'TECH-FSE',
+            toDepartmentId: 'marketing_growth',
+            authorizedBy: OWNER_PRINCIPAL_ID,
+            reason: 'Adversary string-only Owner transfer attempt',
+          })
+        ).toThrow(/cannot authorize an appointment or transfer|verified.*authentication/i);
+
+        // 3. Attempt appointDirector with only EXEC-CEO string
+        expect(() =>
+          testRegistry.appointDirector({
+            departmentId: 'marketing_growth',
+            newDirectorIdOrCode: 'BIZ-DIR',
+            authorizedBy: 'EXEC-CEO',
+            reason: 'Adversary string-only EXEC-CEO appointment attempt',
+          })
+        ).toThrow(/cannot authorize an appointment or transfer|verified.*authentication/i);
+
+        // 4. Attempt transferAgent with only EXEC-CEO string
+        expect(() =>
+          testRegistry.transferAgent({
+            agentIdOrCode: 'TECH-FSE',
+            toDepartmentId: 'marketing_growth',
+            authorizedBy: 'EXEC-CEO',
+            reason: 'Adversary string-only EXEC-CEO transfer attempt',
+          })
+        ).toThrow(/cannot authorize an appointment or transfer|verified.*authentication/i);
+      } finally {
+        client.release();
+      }
+    });
+
+    it('11b. proves missing, invalid, expired, or revoked authentication sessions are rejected under vme_app', async () => {
+      const client = await appPool.connect();
+      try {
+        const testRegistry = new DepartmentRegistry();
+
+        // 1. Tampered executive session token
+        const legitSession = testRegistry.createExecutiveSession('EXEC-CEO');
+        const tamperedSession = {
+          ...legitSession,
+          token: legitSession.token.slice(0, -6) + 'badbad',
+        };
+
+        expect(() =>
+          testRegistry.appointDirector({
+            departmentId: 'marketing_growth',
+            newDirectorIdOrCode: 'BIZ-DIR',
+            authorizedBy: 'EXEC-CEO',
+            executiveSession: tamperedSession,
+            reason: 'Tampered token appointment attempt',
+          })
+        ).toThrow(/signature verification failed/i);
+
+        // 2. Revoked executive session
+        testRegistry.revokeExecutiveSession(legitSession.sessionId, 'Adversarial revocation check');
+        expect(() =>
+          testRegistry.appointDirector({
+            departmentId: 'marketing_growth',
+            newDirectorIdOrCode: 'BIZ-DIR',
+            authorizedBy: 'EXEC-CEO',
+            executiveSession: legitSession,
+            reason: 'Revoked executive appointment attempt',
+          })
+        ).toThrow(/has been revoked/i);
+
+        // 3. Revoked Owner session
+        const ownerSession = testRegistry.createOwnerSession({
+          principalId: OWNER_PRINCIPAL_ID,
+          email: 'stephenikeme@icloud.com',
+        });
+        testRegistry.revokeOwnerSession(ownerSession.sessionId, 'Adversarial owner revocation check');
+        expect(() =>
+          testRegistry.transferAgent({
+            agentIdOrCode: 'TECH-FSE',
+            toDepartmentId: 'marketing_growth',
+            authorizedBy: OWNER_PRINCIPAL_ID,
+            ownerSession,
+            reason: 'Revoked owner transfer attempt',
+          })
+        ).toThrow(/has been revoked/i);
+      } finally {
+        client.release();
+      }
+    });
+
+    it('11c. proves valid authenticated Owner can perform permitted operations and establish PostgreSQL identity', async () => {
+      const client = await appPool.connect();
+      try {
+        const testRegistry = new DepartmentRegistry();
+        const ownerSession = testRegistry.createOwnerSession({
+          principalId: OWNER_PRINCIPAL_ID,
+          email: 'stephenikeme@icloud.com',
+        });
+
+        // 1. Legitimate Owner appoints Director
+        const appt = testRegistry.appointDirector({
+          departmentId: 'marketing_growth',
+          newDirectorIdOrCode: 'BIZ-DIR',
+          authorizedBy: OWNER_PRINCIPAL_ID,
+          ownerSession,
+          reason: 'Authorized Owner appointment of Marketing Director',
+        });
+        expect(appt.authorizationSignature).toBeDefined();
+        expect(testRegistry.getDepartmentDirectorRecord('marketing_growth')?.agentCode).toBe('BIZ-DIR');
+
+        // 2. Legitimate Owner transfers Specialist
+        const transfer = testRegistry.transferAgent({
+          agentIdOrCode: 'TECH-FSE',
+          toDepartmentId: 'operations_administration',
+          authorizedBy: OWNER_PRINCIPAL_ID,
+          ownerSession,
+          reason: 'Authorized Owner transfer to Operations',
+        });
+        expect(transfer.departmentId).toBe('operations_administration');
+        expect(transfer.currentConfig.departmentTransferHistory[0]?.authorizationSignature).toBeDefined();
+
+        // 3. Verify PostgreSQL database session with transferred agent under vme_app
+        await applyAuthenticatedSession(
+          client,
+          {
+            tenantId,
+            agentCode: 'TECH-FSE',
+            principalLevel: 'SPECIALIST',
+          },
+          undefined,
+          testRegistry
+        );
+
+        const checkRes = await client.query(`
+          SELECT 
+            get_current_agent_id() as "agentId",
+            get_current_department_id() as "deptId",
+            current_setting('app.current_principal_level', true) as "level"
+        `);
+        expect(checkRes.rows[0].agentId).toBe('00000000-0000-0000-0000-000000000009');
+        expect(checkRes.rows[0].deptId).toBe('operations_administration');
+        expect(checkRes.rows[0].level).toBe('SPECIALIST');
+
+        await clearAuthenticatedSession(client);
+      } finally {
+        client.release();
+      }
+    });
+
+    it('11d. proves valid authenticated executive can perform only operations within their authority', async () => {
+      const client = await appPool.connect();
+      try {
+        const testRegistry = new DepartmentRegistry();
+        const ceoSession = testRegistry.createExecutiveSession('EXEC-CEO');
+        const cooSession = testRegistry.createExecutiveSession('EXEC-COO');
+
+        // 1. CEO is authorized to appoint non-executive department director
+        const dirAppt = testRegistry.appointDirector({
+          departmentId: 'operations_administration',
+          newDirectorIdOrCode: 'OPS-DIR',
+          authorizedBy: 'EXEC-CEO',
+          executiveSession: ceoSession,
+          reason: 'Authorized CEO confirmation of Director',
+        });
+        expect(dirAppt.authorizationSignature).toBeDefined();
+
+        // 2. CEO cannot appoint leadership for executive_office (Owner only)
+        expect(() =>
+          testRegistry.appointDirector({
+            departmentId: 'executive_office',
+            newDirectorIdOrCode: 'EXEC-COO',
+            authorizedBy: 'EXEC-CEO',
+            executiveSession: ceoSession,
+            reason: 'CEO attempting to appoint executive office director',
+          })
+        ).toThrow(/strictly require human Owner authorization/i);
+
+        // 3. COO cannot appoint department directors (lacks authority)
+        expect(() =>
+          testRegistry.appointDirector({
+            departmentId: 'marketing_growth',
+            newDirectorIdOrCode: 'BIZ-DIR',
+            authorizedBy: 'EXEC-COO',
+            executiveSession: cooSession,
+            reason: 'COO unauthorized director appointment attempt',
+          })
+        ).toThrow(/Executive 'EXEC-COO' lacks authority to appoint Directors/i);
+
+        // 4. COO cannot authorize department transfers (lacks authority)
+        expect(() =>
+          testRegistry.transferAgent({
+            agentIdOrCode: 'TECH-FSE',
+            toDepartmentId: 'operations_administration',
+            authorizedBy: 'EXEC-COO',
+            executiveSession: cooSession,
+            reason: 'COO unauthorized transfer attempt',
+          })
+        ).toThrow(/Executive 'EXEC-COO' lacks authority to authorize department transfers/i);
+      } finally {
+        client.release();
+      }
+    });
+
+    it('11e. proves rejected requests leave hierarchy records and signed ledgers completely unmutated', async () => {
+      const client = await appPool.connect();
+      try {
+        const testRegistry = new DepartmentRegistry();
+        const initialMarketingDir = testRegistry.getDepartmentDirectorRecord('marketing_growth')?.agentCode;
+        const initialLeadershipLen = testRegistry.getLeadershipHistory().length;
+        const initialAgentDept = testRegistry.getAgentRecord('TECH-FSE')?.departmentId;
+        const initialTransferLen = testRegistry.getTransferHistory().length;
+
+        // Rejected appointment attempt: string only
+        expect(() =>
+          testRegistry.appointDirector({
+            departmentId: 'marketing_growth',
+            newDirectorIdOrCode: 'BIZ-DIR',
+            authorizedBy: 'EXEC-CEO',
+            reason: 'Unauthenticated attempt',
+          })
+        ).toThrow(UnauthorizedHierarchyActionError);
+
+        // Rejected transfer attempt: unauthorized executive
+        const cooSession = testRegistry.createExecutiveSession('EXEC-COO');
+        expect(() =>
+          testRegistry.transferAgent({
+            agentIdOrCode: 'TECH-FSE',
+            toDepartmentId: 'marketing_growth',
+            authorizedBy: 'EXEC-COO',
+            executiveSession: cooSession,
+            reason: 'COO unauthorized transfer attempt',
+          })
+        ).toThrow(UnauthorizedHierarchyActionError);
+
+        // Assert zero mutation to leadership state and ledger
+        expect(testRegistry.getDepartmentDirectorRecord('marketing_growth')?.agentCode).toBe(initialMarketingDir);
+        expect(testRegistry.getLeadershipHistory().length).toBe(initialLeadershipLen);
+
+        // Assert zero mutation to workforce state and transfer ledger
+        expect(testRegistry.getAgentRecord('TECH-FSE')?.departmentId).toBe(initialAgentDept);
+        expect(testRegistry.getTransferHistory().length).toBe(initialTransferLen);
+      } finally {
+        client.release();
+      }
+    });
+
+    it('11f. proves missing DB_SESSION_SECRET prevents signing and fails closed', async () => {
+      const originalSecret = process.env.DB_SESSION_SECRET;
+      try {
+        delete process.env.DB_SESSION_SECRET;
+
+        const testRegistry = new DepartmentRegistry();
+        expect(() => {
+          testRegistry.createExecutiveSession('EXEC-CEO');
+        }).toThrow(/DB_SESSION_SECRET.*must be independently provisioned/i);
+
+        expect(() => {
+          testRegistry.appointDirector({
+            departmentId: 'marketing_growth',
+            newDirectorIdOrCode: 'BIZ-DIR',
+            authorizedBy: 'EXEC-CEO',
+            reason: 'Signing attempt without secret',
+          });
+        }).toThrow(/DB_SESSION_SECRET.*must be independently provisioned/i);
+      } finally {
+        process.env.DB_SESSION_SECRET = originalSecret;
       }
     });
   });

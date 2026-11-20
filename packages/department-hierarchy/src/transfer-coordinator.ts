@@ -9,6 +9,12 @@ import {
 } from '@vme/shared-types';
 import type { HierarchyTree } from './hierarchy-tree.js';
 import { UnauthorizedHierarchyActionError } from './delegation-rules.js';
+import {
+  getHierarchyAuthoritySecret,
+  verifyHierarchyAuthorization,
+  ExecutiveAuthenticationService,
+} from './hierarchy-authorizer.js';
+import { OwnerAuthenticationService } from '@vme/security-governance';
 
 export interface AuthoritativeTransferRecord extends DepartmentTransferRecord {
   agentId: string;
@@ -26,7 +32,7 @@ export function computeTransferAuthorizationSignature(
     authorizedBy: string;
     reason?: string;
   },
-  secret: string = process.env.DB_SESSION_SECRET || 'vme-canonical-hierarchy-authority-secret-2026'
+  secret: string = getHierarchyAuthoritySecret()
 ): string {
   const canonical = [
     'TRANSFER_AUTH_V1',
@@ -46,7 +52,7 @@ export function verifyTransferAuthorizationSignature(
   agentId: string,
   agentCode: string,
   record: DepartmentTransferRecord,
-  secret: string = process.env.DB_SESSION_SECRET || 'vme-canonical-hierarchy-authority-secret-2026'
+  secret: string = getHierarchyAuthoritySecret()
 ): boolean {
   if (!record.authorizationSignature || typeof record.authorizationSignature !== 'string') {
     return false;
@@ -71,11 +77,16 @@ export interface TransferAgentParams {
   agentIdOrCode: string;
   toDepartmentId: DepartmentId;
   reason: string;
-  authorizedBy: string;
+  authorizedBy?: unknown;
+  authorizerSession?: unknown;
+  ownerSession?: unknown;
+  executiveSession?: unknown;
   effectiveDate?: string;
   newJobTitle?: string;
   newSupervisor?: AgentSupervisor;
   newVersion?: string;
+  ownerAuthService?: OwnerAuthenticationService;
+  executiveAuthService?: ExecutiveAuthenticationService;
 }
 
 /**
@@ -88,7 +99,9 @@ export class DepartmentTransferCoordinator {
   constructor(
     private readonly departments: Map<DepartmentId, Department>,
     private readonly agents: Map<string, AgentRecord>,
-    private readonly tree: HierarchyTree
+    private readonly tree: HierarchyTree,
+    public readonly ownerAuthService?: OwnerAuthenticationService,
+    public readonly executiveAuthService?: ExecutiveAuthenticationService
   ) {}
 
   /**
@@ -104,7 +117,7 @@ export class DepartmentTransferCoordinator {
   }
 
   transferAgent(params: TransferAgentParams): AgentRecord {
-    // 1. Resolve agent
+    // 1. Resolve agent BEFORE mutation
     const currentRecord =
       this.agents.get(params.agentIdOrCode) ??
       Array.from(this.agents.values()).find((a) => a.agentCode === params.agentIdOrCode);
@@ -113,15 +126,30 @@ export class DepartmentTransferCoordinator {
       throw new UnauthorizedHierarchyActionError(`Agent '${params.agentIdOrCode}' not found`);
     }
 
-    // 2. Validate destination department exists
+    // 2. Validate destination department exists BEFORE mutation
     const targetDept = this.departments.get(params.toDepartmentId);
     if (!targetDept) {
       throw new UnauthorizedHierarchyActionError(`Unknown destination department '${params.toDepartmentId}'`);
     }
 
+    // 3. Ensure securely provisioned DB_SESSION_SECRET exists BEFORE mutation
+    const secret = getHierarchyAuthoritySecret();
+
+    // 4. Authenticate the authorizing principal and verify authority BEFORE mutation
+    const verifiedAuthorizer = verifyHierarchyAuthorization(
+      params,
+      'TRANSFER_AGENT',
+      params.toDepartmentId,
+      currentRecord,
+      this.agents,
+      secret,
+      params.ownerAuthService ?? this.ownerAuthService,
+      params.executiveAuthService ?? this.executiveAuthService
+    );
+
+    // 5. Generate transfer cryptographic signature
     const transferId = randomUUID();
     const effectiveDate = params.effectiveDate ?? new Date().toISOString();
-    const secret = process.env.DB_SESSION_SECRET || 'vme-canonical-hierarchy-authority-secret-2026';
     const signature = computeTransferAuthorizationSignature(
       {
         transferId,
@@ -130,15 +158,14 @@ export class DepartmentTransferCoordinator {
         fromDepartmentId: currentRecord.departmentId,
         toDepartmentId: params.toDepartmentId,
         effectiveDate,
-        authorizedBy: params.authorizedBy,
+        authorizedBy: verifiedAuthorizer,
         reason: params.reason,
       },
       secret
     );
 
-    // 3. Delegate to M2.1 transferAgentDepartment() for strict validation:
+    // 6. Delegate to M2.1 transferAgentDepartment() for strict validation:
     // - Destination existence
-    // - Authorization anchoring to canonical founding executives or Owner
     // - Strict SemVer progression
     // - Strictly advancing timestamps
     // - Frozen transfer record with cryptographic signature
@@ -148,7 +175,7 @@ export class DepartmentTransferCoordinator {
       authorizationSignature: signature,
       toDepartmentId: params.toDepartmentId,
       reason: params.reason,
-      authorizedBy: params.authorizedBy,
+      authorizedBy: verifiedAuthorizer,
       effectiveDate,
       newJobTitle: params.newJobTitle,
       newSupervisor: params.newSupervisor,
@@ -157,10 +184,10 @@ export class DepartmentTransferCoordinator {
       knownDepartments: Array.from(this.departments.values()),
     });
 
-    // 4. Update internal registry maps
+    // 7. Update internal registry maps
     this.agents.set(updatedRecord.id, updatedRecord);
 
-    // 5. Update hierarchy tree
+    // 8. Update hierarchy tree
     this.tree.updateAgentRecord(updatedRecord);
 
     const latestTransfer =
