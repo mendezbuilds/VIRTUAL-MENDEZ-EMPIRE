@@ -8,6 +8,7 @@ import {
   type DepartmentId,
 } from '@vme/shared-types';
 import type { EmergencySupervisor } from '@vme/security-governance';
+import { DepartmentRegistry } from '@vme/department-hierarchy';
 import { WorkingMemory } from './working-memory.js';
 import { EpisodicMemory, InMemoryEpisodicStorage, type EpisodicMemoryFilter } from './episodic-memory.js';
 import {
@@ -38,6 +39,7 @@ import {
   PostgresProceduralStorage,
   PostgresStorageError,
   type RlsSessionContext,
+  type AuthoritativeWorkforceIdentityProvider,
 } from './postgres-memory-storage.js';
 
 export type MemoryEngineMode = 'PRODUCTION_POSTGRES' | 'TEST_IN_MEMORY';
@@ -46,6 +48,8 @@ export interface AgentMemoryEngineOptions {
   mode?: MemoryEngineMode;
   pool?: Pool;
   defaultTenantId?: string;
+  defaultAgentId?: string;
+  departmentRegistry?: AuthoritativeWorkforceIdentityProvider | DepartmentRegistry;
   workingMemory?: WorkingMemory;
   episodicMemory?: EpisodicMemory;
   semanticMemory?: SemanticMemory;
@@ -81,21 +85,26 @@ export class AgentMemoryEngine {
       }
       const pool = options.pool;
       const tenantId = options.defaultTenantId ?? '00000000-0000-0000-0000-000000000001';
+      const defaultAgentId = options.defaultAgentId ?? '00000000-0000-0000-0000-000000000008';
+      const departmentRegistry = options.departmentRegistry ?? new DepartmentRegistry();
       // Secure least-privilege default RlsSessionContext for standard agent operations (never defaults to OWNER)
       const rlsContext: RlsSessionContext = {
         tenantId,
+        agentId: defaultAgentId,
+        departmentId: 'technology_engineering',
         principalLevel: 'SPECIALIST',
         isOwnerAuthenticated: false,
+        authoritativeRegistry: departmentRegistry,
       };
 
-      const workingStorage = new PostgresWorkingStorage(pool, rlsContext);
+      const workingStorage = new PostgresWorkingStorage(pool, rlsContext, departmentRegistry);
       this.working = options.workingMemory ?? new WorkingMemory({ storage: workingStorage });
       this.episodic =
-        options.episodicMemory ?? new EpisodicMemory(new PostgresEpisodicStorage(pool, rlsContext));
+        options.episodicMemory ?? new EpisodicMemory(new PostgresEpisodicStorage(pool, rlsContext, departmentRegistry));
       this.semantic =
-        options.semanticMemory ?? new SemanticMemory(new PostgresSemanticStorage(pool, rlsContext));
+        options.semanticMemory ?? new SemanticMemory(new PostgresSemanticStorage(pool, rlsContext, departmentRegistry));
       this.procedural =
-        options.proceduralMemory ?? new ProceduralMemory(new PostgresProceduralStorage(pool, rlsContext));
+        options.proceduralMemory ?? new ProceduralMemory(new PostgresProceduralStorage(pool, rlsContext, departmentRegistry));
     } else {
       // Explicit test double mode
       this.working = options?.workingMemory ?? new WorkingMemory();

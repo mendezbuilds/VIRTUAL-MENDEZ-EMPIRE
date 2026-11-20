@@ -98,8 +98,8 @@ export class ToolExecutionRuntime {
   ) {
     if (optionsOrSupervisor && 'assertOperational' in optionsOrSupervisor) {
       this.emergencySupervisor = optionsOrSupervisor;
-      this.policyEngine = new ConsequentialPolicyEngine();
-      this.executionRecorder = new TaskExecutionRecorder();
+      this.policyEngine = new ConsequentialPolicyEngine({ departmentRegistry: this.hierarchy });
+      this.executionRecorder = new TaskExecutionRecorder(undefined, undefined, this.hierarchy);
       this.fsAdapter = new RealFileSystemAdapter();
       this.terminalAdapter = new RealTerminalCommandAdapter();
       this.httpAdapter = new RealHttpNetworkAdapter();
@@ -107,15 +107,15 @@ export class ToolExecutionRuntime {
       const opts = optionsOrSupervisor as ToolRuntimeOptions;
       this.emergencySupervisor = opts.emergencySupervisor;
       this.policyEngine =
-        opts.policyEngine ?? new ConsequentialPolicyEngine({ pool: opts.pool, tenantId: opts.tenantId });
+        opts.policyEngine ?? new ConsequentialPolicyEngine({ pool: opts.pool, tenantId: opts.tenantId, departmentRegistry: this.hierarchy });
       this.eventStore = opts.eventStore;
-      this.executionRecorder = new TaskExecutionRecorder(opts.pool, opts.tenantId);
+      this.executionRecorder = new TaskExecutionRecorder(opts.pool, opts.tenantId, this.hierarchy);
       this.fsAdapter = new RealFileSystemAdapter(opts.workspaceRoot);
       this.terminalAdapter = new RealTerminalCommandAdapter(opts.workspaceRoot);
       this.httpAdapter = new RealHttpNetworkAdapter();
     } else {
-      this.policyEngine = new ConsequentialPolicyEngine();
-      this.executionRecorder = new TaskExecutionRecorder();
+      this.policyEngine = new ConsequentialPolicyEngine({ departmentRegistry: this.hierarchy });
+      this.executionRecorder = new TaskExecutionRecorder(undefined, undefined, this.hierarchy);
       this.fsAdapter = new RealFileSystemAdapter();
       this.terminalAdapter = new RealTerminalCommandAdapter();
       this.httpAdapter = new RealHttpNetworkAdapter();

@@ -4,7 +4,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
-import { applyAuthenticatedSession, clearAuthenticatedSession } from '@vme/agent-memory';
+import { applyAuthenticatedSession, clearAuthenticatedSession, type AuthoritativeWorkforceIdentityProvider } from '@vme/agent-memory';
+import { DepartmentRegistry } from '@vme/department-hierarchy';
 
 const execFileAsync = promisify(execFile);
 
@@ -423,11 +424,15 @@ export interface TaskExecutionRecord {
  */
 export class TaskExecutionRecorder {
   private records = new Map<string, TaskExecutionRecord>();
+  public readonly departmentRegistry: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider;
 
   constructor(
     private readonly pool?: Pool,
-    private readonly tenantId: string = '00000000-0000-0000-0000-000000000001'
-  ) {}
+    private readonly tenantId: string = '00000000-0000-0000-0000-000000000001',
+    departmentRegistry?: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider
+  ) {
+    this.departmentRegistry = departmentRegistry ?? new DepartmentRegistry();
+  }
 
   async startExecution(params: {
     taskId: string;
@@ -458,7 +463,7 @@ export class TaskExecutionRecorder {
           tenantId: this.tenantId,
           agentId: record.assignedAgentId,
           principalLevel: 'SPECIALIST',
-        });
+        }, undefined, this.departmentRegistry);
 
         await client.query(
           `INSERT INTO task_execution_records (
@@ -514,7 +519,7 @@ export class TaskExecutionRecorder {
           tenantId: this.tenantId,
           agentId: record.assignedAgentId,
           principalLevel: 'SPECIALIST',
-        });
+        }, undefined, this.departmentRegistry);
 
         await client.query(
           `UPDATE task_execution_records

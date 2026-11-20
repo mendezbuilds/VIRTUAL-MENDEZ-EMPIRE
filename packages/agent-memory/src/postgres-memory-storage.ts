@@ -3,6 +3,9 @@ import type { Pool, PoolClient } from 'pg';
 import {
   OWNER_PRINCIPAL_ID,
   CANONICAL_OWNER_PRINCIPAL,
+  CANONICAL_FOUNDING_AGENTS,
+  isAuthorizedTransferAuthority,
+  type AgentRecord,
   type EpisodicMemoryRecord,
   type SemanticKnowledgeItem,
   type ProceduralPlaybook,
@@ -14,7 +17,7 @@ import {
   ProceduralPlaybookSchema,
 } from '@vme/shared-types';
 import { verifyOwnerSessionToken } from '@vme/security-governance';
-import { DepartmentRegistry } from '@vme/department-hierarchy';
+import { DepartmentRegistry, type LeadershipAppointmentRecord } from '@vme/department-hierarchy';
 import type { EpisodicMemoryFilter, EpisodicMemoryStorage } from './episodic-memory.js';
 import type { SemanticSearchFilter, SemanticSearchResult, SemanticStorage } from './semantic-memory.js';
 import type { ProceduralQueryFilter, ProceduralStorage } from './procedural-memory.js';
@@ -25,6 +28,12 @@ import {
 } from './semantic-memory.js';
 import type { WorkingMemoryStorage } from './working-memory.js';
 
+export interface AuthoritativeWorkforceIdentityProvider {
+  getAgentRecord(idOrCode: string): AgentRecord | null;
+  getLeadershipHistory?(departmentId?: DepartmentId): LeadershipAppointmentRecord[];
+  auditIntegrity?(): { valid: boolean; errors: string[] };
+}
+
 export interface RlsSessionContext {
   tenantId: string;
   agentId?: string;
@@ -33,6 +42,7 @@ export interface RlsSessionContext {
   principalLevel?: string;
   isOwnerAuthenticated?: boolean;
   ownerSession?: unknown;
+  authoritativeRegistry?: AuthoritativeWorkforceIdentityProvider | DepartmentRegistry;
 }
 
 export class PostgresStorageError extends Error {
@@ -100,18 +110,122 @@ export function signDatabaseClaims(
 }
 
 /**
+ * Validates that an injected workforce registry or identity provider is authoritative,
+ * reflecting canonical organizational records, valid Director appointments, and authorized transfers.
+ * Strictly prevents fabricated registries from establishing privileged (Executive/Director) identity.
+ */
+export function verifyRegistryAuthoritativeness(
+  registry: AuthoritativeWorkforceIdentityProvider | DepartmentRegistry,
+  agentRecord: AgentRecord,
+  requestedLevel?: string
+): void {
+  // 1. Look up agent in CANONICAL_FOUNDING_AGENTS
+  const canonicalAgent = CANONICAL_FOUNDING_AGENTS.find(
+    (ca) => ca.id === agentRecord.id || ca.agentCode === agentRecord.agentCode
+  );
+
+  if (!canonicalAgent) {
+    throw new PostgresStorageError(
+      `Database session claims issuance rejected: Agent '${agentRecord.agentCode || agentRecord.id}' is not a registered workforce agent in authoritative canonical records.`
+    );
+  }
+
+  // 2. Immutable identifier integrity
+  if (canonicalAgent.id !== agentRecord.id || canonicalAgent.agentCode !== agentRecord.agentCode) {
+    throw new PostgresStorageError(
+      `Database session claims issuance rejected: Identity mismatch. Agent ID '${agentRecord.id}' or code '${agentRecord.agentCode}' does not match canonical organizational record.`
+    );
+  }
+
+  // 3. Privileged Executive Claims Verification: strictly requires canonical executive status or Owner appointment
+  if (agentRecord.level === 'EXECUTIVE' || requestedLevel === 'EXECUTIVE') {
+    if (canonicalAgent.level !== 'EXECUTIVE') {
+      const leadershipHistory = typeof registry.getLeadershipHistory === 'function'
+        ? registry.getLeadershipHistory('executive_office')
+        : [];
+      const hasOwnerAppointment = leadershipHistory.some(
+        (rec) =>
+          (rec.newDirectorId === agentRecord.id || rec.newDirectorCode === agentRecord.agentCode) &&
+          (rec.appointedBy === OWNER_PRINCIPAL_ID || rec.appointedBy === CANONICAL_OWNER_PRINCIPAL.principalId)
+      );
+      if (!hasOwnerAppointment) {
+        throw new PostgresStorageError(
+          `Privileged database identity issuance rejected: Fabricated or unverified registry cannot grant Executive privileges to non-canonical agent '${agentRecord.agentCode}'. Elevation requires authoritative Owner appointment.`
+        );
+      }
+    }
+  }
+
+  // 4. Privileged Director Claims Verification: requires canonical founding director status or authentic appointment
+  if (agentRecord.level === 'DIRECTOR' || requestedLevel === 'DIRECTOR') {
+    const isCanonicalDirectorOfDept =
+      canonicalAgent.level === 'DIRECTOR' && canonicalAgent.departmentId === agentRecord.departmentId;
+
+    if (!isCanonicalDirectorOfDept) {
+      const leadershipHistory = typeof registry.getLeadershipHistory === 'function'
+        ? registry.getLeadershipHistory(agentRecord.departmentId)
+        : [];
+      const canonicalCeo = CANONICAL_FOUNDING_AGENTS.find((a) => a.agentCode === 'EXEC-CEO');
+      const hasValidAppointment = leadershipHistory.some(
+        (rec) =>
+          (rec.newDirectorId === agentRecord.id || rec.newDirectorCode === agentRecord.agentCode) &&
+          (rec.appointedBy === OWNER_PRINCIPAL_ID ||
+           rec.appointedBy === CANONICAL_OWNER_PRINCIPAL.principalId ||
+           rec.appointedBy === 'EXEC-CEO' ||
+           rec.appointedBy === canonicalCeo?.id)
+      );
+      if (!hasValidAppointment) {
+        throw new PostgresStorageError(
+          `Privileged database identity issuance rejected: Fabricated or unverified registry cannot grant Director privileges to '${agentRecord.agentCode}' for department '${agentRecord.departmentId}'. Elevation requires authoritative Director appointment record.`
+        );
+      }
+    }
+  }
+
+  // 5. Current appointments & transfers verification
+  if (agentRecord.departmentId !== canonicalAgent.departmentId) {
+    const transferHistory =
+      agentRecord.currentConfig?.departmentTransferHistory ??
+      (agentRecord as any).departmentTransferHistory ??
+      [];
+    const latestTransfer = transferHistory.length ? transferHistory[transferHistory.length - 1] : undefined;
+    if (!latestTransfer) {
+      throw new PostgresStorageError(
+        `Database session claims issuance rejected: Agent '${agentRecord.agentCode}' department '${agentRecord.departmentId}' differs from canonical origin '${canonicalAgent.departmentId}' without authorized transfer history.`
+      );
+    }
+    if (latestTransfer.toDepartmentId !== agentRecord.departmentId) {
+      throw new PostgresStorageError(
+        `Database session claims issuance rejected: Agent '${agentRecord.agentCode}' latest transfer destination '${latestTransfer.toDepartmentId}' does not match current department '${agentRecord.departmentId}'.`
+      );
+    }
+    if (!isAuthorizedTransferAuthority(latestTransfer.authorizedBy, CANONICAL_FOUNDING_AGENTS)) {
+      throw new PostgresStorageError(
+        `Database session claims issuance rejected: Agent '${agentRecord.agentCode}' transfer to '${agentRecord.departmentId}' was authorized by '${latestTransfer.authorizedBy}', which lacks executive or Owner transfer authority.`
+      );
+    }
+  }
+}
+
+/**
  * Issues authenticated database session claims.
- * Strictly verifies privileged claims:
+ * Strictly verifies privileged and specialist claims:
  * - Owner claims REQUIRE a verified Owner session (cryptographically verified token);
- *   caller-supplied booleans are rejected.
- * - Executive/Director claims MUST originate from trusted organizational workforce records
- *   (DepartmentRegistry); elevation attempts are rejected.
- * - Ordinary specialist sessions remain strictly unprivileged.
+ *   caller-supplied booleans or agent IDs are rejected.
+ * - Requires an explicitly injected authoritative DepartmentRegistry or trusted identity-provider interface;
+ *   implicit fallback to `new DepartmentRegistry()` is removed.
+ * - Rejects any unregistered agent ID or agent code.
+ * - Enforces agent identity binding (a registered agent cannot claim another agent's ID).
+ * - Rejects caller-supplied department IDs that differ from the registered agent's department.
+ * - Never issues agent-scoped database identity when missing agent identity.
+ * - Verifies that the registry reflects canonical organizational records and current appointments/transfers,
+ *   strictly barring fabricated registries from granting Executive or Director privileges.
+ * - Resolves agent ID, department ID, and principal level exclusively from the authoritative workforce record.
  */
 export function issueAuthenticatedDatabaseClaims(
   context: RlsSessionContext,
   secret: string = getDatabaseSessionSecret(),
-  departmentRegistry?: DepartmentRegistry
+  departmentRegistry?: AuthoritativeWorkforceIdentityProvider | DepartmentRegistry
 ): { claimsPayload: Record<string, unknown>; signature: string } {
   if (!context.tenantId || context.tenantId.trim().length === 0) {
     throw new PostgresStorageError('Database session claims issuance failed: tenantId is required.');
@@ -121,8 +235,6 @@ export function issueAuthenticatedDatabaseClaims(
   const nonce = randomBytes(8).toString('hex');
 
   const wantsOwner = context.isOwnerAuthenticated === true || context.principalLevel === 'OWNER';
-  const wantsExecutive = context.principalLevel === 'EXECUTIVE';
-  const wantsDirector = context.principalLevel === 'DIRECTOR';
 
   let resolvedAgentId = '';
   let resolvedDepartmentId = '';
@@ -148,65 +260,96 @@ export function issueAuthenticatedDatabaseClaims(
       );
     }
 
+    if (context.agentId && context.agentId !== OWNER_PRINCIPAL_ID) {
+      throw new PostgresStorageError(
+        `Privileged database identity issuance rejected: Owner principal cannot claim an AI agent ID ('${context.agentId}').`
+      );
+    }
+
     resolvedIsOwner = true;
     resolvedLevel = 'OWNER';
     resolvedAgentId = OWNER_PRINCIPAL_ID;
     resolvedDepartmentId = 'executive_office';
-  } else if (wantsExecutive || wantsDirector) {
-    // 2. Privileged Executive/Director Claims Issuance: MUST originate from trusted organizational records
-    const agentLookup = context.agentId || context.agentCode;
-    if (!agentLookup) {
+  } else {
+    // 2. Agent Claims Issuance: strictly requires authenticated, registered agent identity
+    if (!context.agentId && !context.agentCode) {
       throw new PostgresStorageError(
-        'Privileged database identity issuance rejected: Executive/Director claims require a valid organizational agent identifier.'
+        'Database session claims issuance rejected: Missing agent identity. An agent-scoped database session requires an authenticated, registered agent identity (agentId or agentCode).'
       );
     }
 
-    const registry = departmentRegistry ?? new DepartmentRegistry();
+    const registry = departmentRegistry ?? context.authoritativeRegistry;
+    if (!registry || typeof registry.getAgentRecord !== 'function') {
+      throw new PostgresStorageError(
+        'Database session claims issuance rejected: Authoritative workforce registry or trusted identity provider must be explicitly injected. Implicit registry fallback is strictly prohibited.'
+      );
+    }
+
+    const agentLookup = context.agentId || context.agentCode!;
     const agentRecord = registry.getAgentRecord(agentLookup);
 
     if (!agentRecord) {
       throw new PostgresStorageError(
-        `Privileged database identity issuance rejected: Agent '${agentLookup}' is not a registered workforce agent in trusted organizational records.`
+        `Database session claims issuance rejected: Agent '${agentLookup}' cannot be resolved to an authoritative registered workforce record. Unregistered agent identities are strictly rejected.`
       );
     }
 
-    if (wantsExecutive && agentRecord.level !== 'EXECUTIVE') {
+    // A registered agent cannot claim another agent's ID or code
+    if (context.agentId && context.agentCode) {
+      const recordById = registry.getAgentRecord(context.agentId);
+      const recordByCode = registry.getAgentRecord(context.agentCode);
+      if (!recordById || !recordByCode || recordById.id !== recordByCode.id || recordById.agentCode !== recordByCode.agentCode) {
+        throw new PostgresStorageError(
+          `Database session claims issuance rejected: Identity mismatch. Agent ID '${context.agentId}' does not match agent code '${context.agentCode}'. A registered agent cannot claim another agent's ID.`
+        );
+      }
+    }
+
+    if (context.agentId && agentRecord.id !== context.agentId) {
       throw new PostgresStorageError(
-        `Privileged database identity issuance rejected: Agent '${agentRecord.agentCode}' is registered with level '${agentRecord.level}', not 'EXECUTIVE'. Elevation prohibited.`
+        `Database session claims issuance rejected: Agent record ID '${agentRecord.id}' does not match supplied agentId '${context.agentId}'. Spoofing another agent's ID is strictly prohibited.`
       );
     }
 
-    if (wantsDirector && agentRecord.level !== 'DIRECTOR' && agentRecord.level !== 'EXECUTIVE') {
+    if (context.agentCode && agentRecord.agentCode !== context.agentCode) {
       throw new PostgresStorageError(
-        `Privileged database identity issuance rejected: Agent '${agentRecord.agentCode}' is registered with level '${agentRecord.level}', not 'DIRECTOR'. Elevation prohibited.`
+        `Database session claims issuance rejected: Agent record code '${agentRecord.agentCode}' does not match supplied agentCode '${context.agentCode}'. Spoofing another agent's identity is strictly prohibited.`
       );
     }
+
+    // Never accept caller-supplied department IDs as a substitute for a registered agent's department
+    if (context.departmentId && context.departmentId !== agentRecord.departmentId) {
+      throw new PostgresStorageError(
+        `Database session claims issuance rejected: Caller-supplied departmentId '${context.departmentId}' does not match registered department '${agentRecord.departmentId}' for agent '${agentRecord.agentCode}'. Caller cannot substitute or override a registered agent's department.`
+      );
+    }
+
+    // Principal level elevation checks
+    if (context.principalLevel && context.principalLevel !== agentRecord.level) {
+      if (context.principalLevel === 'OWNER') {
+        throw new PostgresStorageError(
+          `Privileged database identity issuance rejected: Agent '${agentRecord.agentCode}' is an AI agent and cannot claim OWNER principal level.`
+        );
+      }
+      if (context.principalLevel === 'EXECUTIVE' && agentRecord.level !== 'EXECUTIVE') {
+        throw new PostgresStorageError(
+          `Privileged database identity issuance rejected: Agent '${agentRecord.agentCode}' is registered with level '${agentRecord.level}', not 'EXECUTIVE'. Elevation prohibited.`
+        );
+      }
+      if (context.principalLevel === 'DIRECTOR' && agentRecord.level !== 'DIRECTOR' && agentRecord.level !== 'EXECUTIVE') {
+        throw new PostgresStorageError(
+          `Privileged database identity issuance rejected: Agent '${agentRecord.agentCode}' is registered with level '${agentRecord.level}', not 'DIRECTOR'. Elevation prohibited.`
+        );
+      }
+    }
+
+    // Verify registry authoritativeness and canonical consistency
+    verifyRegistryAuthoritativeness(registry, agentRecord, context.principalLevel);
 
     resolvedIsOwner = false;
-    resolvedLevel = agentRecord.level;
     resolvedAgentId = agentRecord.id;
     resolvedDepartmentId = agentRecord.departmentId;
-  } else {
-    // 3. Ordinary Specialist Claims Issuance: strictly unprivileged
-    const agentLookup = context.agentId || context.agentCode;
-    if (agentLookup) {
-      const registry = departmentRegistry ?? new DepartmentRegistry();
-      const agentRecord = registry.getAgentRecord(agentLookup);
-      if (agentRecord) {
-        resolvedAgentId = agentRecord.id;
-        resolvedDepartmentId = agentRecord.departmentId;
-        resolvedLevel = agentRecord.level === 'EXECUTIVE' || agentRecord.level === 'DIRECTOR' ? agentRecord.level : 'SPECIALIST';
-      } else {
-        resolvedAgentId = context.agentId ?? '';
-        resolvedDepartmentId = context.departmentId && context.departmentId !== 'executive_office' ? context.departmentId : '';
-        resolvedLevel = 'SPECIALIST';
-      }
-    } else {
-      resolvedAgentId = '';
-      resolvedDepartmentId = context.departmentId && context.departmentId !== 'executive_office' ? context.departmentId : '';
-      resolvedLevel = 'SPECIALIST';
-    }
-    resolvedIsOwner = false;
+    resolvedLevel = agentRecord.level;
   }
 
   const claimsPayload: Record<string, unknown> = {
@@ -242,7 +385,7 @@ export async function applyAuthenticatedSession(
   client: { query: (text: string, values?: any[]) => Promise<any> },
   context: RlsSessionContext,
   secret: string = getDatabaseSessionSecret(),
-  departmentRegistry?: DepartmentRegistry
+  departmentRegistry?: AuthoritativeWorkforceIdentityProvider | DepartmentRegistry
 ): Promise<void> {
   const { claimsPayload, signature } = issueAuthenticatedDatabaseClaims(context, secret, departmentRegistry);
 
@@ -307,12 +450,15 @@ export async function clearAuthenticatedSession(
 export async function withSessionRls<T>(
   pool: Pool,
   context: RlsSessionContext,
-  operation: (client: PoolClient) => Promise<T>
+  operation: (client: PoolClient) => Promise<T>,
+  departmentRegistry?: AuthoritativeWorkforceIdentityProvider | DepartmentRegistry,
+  secret: string = getDatabaseSessionSecret()
 ): Promise<T> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await applyAuthenticatedSession(client, context);
+    const registry = departmentRegistry ?? context.authoritativeRegistry;
+    await applyAuthenticatedSession(client, context, secret, registry);
     const result = await operation(client);
     await client.query('COMMIT');
     return result;
@@ -336,7 +482,8 @@ export async function withSessionRls<T>(
 export class PostgresWorkingStorage implements WorkingMemoryStorage {
   constructor(
     private readonly pool: Pool,
-    private readonly context?: RlsSessionContext
+    private readonly context?: RlsSessionContext,
+    private readonly departmentRegistry?: AuthoritativeWorkforceIdentityProvider | DepartmentRegistry
   ) {}
 
   private resolveContext(explicitContext?: RlsSessionContext): RlsSessionContext {
@@ -380,6 +527,7 @@ export class PostgresWorkingStorage implements WorkingMemoryStorage {
       agentId = (agentIdOrValue as string) ?? ctx.agentId ?? '00000000-0000-0000-0000-000000000000';
     }
 
+    const reg = ctx.authoritativeRegistry ?? this.departmentRegistry;
     await withSessionRls(this.pool, ctx, async (client) => {
       await client.query(
         `INSERT INTO agent_working_memories (id, tenant_id, task_id, agent_id, key, value, expires_at, updated_at)
@@ -388,7 +536,7 @@ export class PostgresWorkingStorage implements WorkingMemoryStorage {
          DO UPDATE SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at, updated_at = clock_timestamp()`,
         [randomUUID(), ctx.tenantId, taskId, agentId, key, JSON.stringify(value), expiresAt]
       );
-    });
+    }, reg);
   }
 
   async get<T>(
@@ -410,6 +558,7 @@ export class PostgresWorkingStorage implements WorkingMemoryStorage {
       key = taskIdOrKey;
     }
 
+    const reg = ctx.authoritativeRegistry ?? this.departmentRegistry;
     return withSessionRls(this.pool, ctx, async (client) => {
       const res = await client.query(
         `SELECT value FROM agent_working_memories
@@ -418,7 +567,7 @@ export class PostgresWorkingStorage implements WorkingMemoryStorage {
       );
       if (res.rows.length === 0) return undefined;
       return res.rows[0].value as T;
-    });
+    }, reg);
   }
 
   async getAll(
@@ -436,6 +585,7 @@ export class PostgresWorkingStorage implements WorkingMemoryStorage {
       taskId = contextOrTaskId;
     }
 
+    const reg = ctx.authoritativeRegistry ?? this.departmentRegistry;
     return withSessionRls(this.pool, ctx, async (client) => {
       const res = await client.query(
         `SELECT key, value FROM agent_working_memories
@@ -447,7 +597,7 @@ export class PostgresWorkingStorage implements WorkingMemoryStorage {
         result[row.key] = row.value;
       }
       return result;
-    });
+    }, reg);
   }
 
   async clear(contextOrTaskId: RlsSessionContext | string, maybeTaskId?: string): Promise<void> {
@@ -462,23 +612,25 @@ export class PostgresWorkingStorage implements WorkingMemoryStorage {
       taskId = contextOrTaskId;
     }
 
+    const reg = ctx.authoritativeRegistry ?? this.departmentRegistry;
     await withSessionRls(this.pool, ctx, async (client) => {
       await client.query(
         `DELETE FROM agent_working_memories WHERE tenant_id = $1 AND task_id = $2`,
         [ctx.tenantId, taskId]
       );
-    });
+    }, reg);
   }
 
   async cleanupExpired(context?: RlsSessionContext): Promise<number> {
     const ctx = this.resolveContext(context);
+    const reg = ctx.authoritativeRegistry ?? this.departmentRegistry;
     return withSessionRls(this.pool, ctx, async (client) => {
       const res = await client.query(
         `DELETE FROM agent_working_memories WHERE tenant_id = $1 AND expires_at <= clock_timestamp()`,
         [ctx.tenantId]
       );
       return res.rowCount ?? 0;
-    });
+    }, reg);
   }
 }
 
@@ -488,8 +640,13 @@ export class PostgresWorkingStorage implements WorkingMemoryStorage {
 export class PostgresEpisodicStorage implements EpisodicMemoryStorage {
   constructor(
     private readonly pool: Pool,
-    private readonly defaultContext: RlsSessionContext
+    private readonly defaultContext: RlsSessionContext,
+    private readonly departmentRegistry?: AuthoritativeWorkforceIdentityProvider | DepartmentRegistry
   ) {}
+
+  private get registry(): AuthoritativeWorkforceIdentityProvider | DepartmentRegistry | undefined {
+    return this.defaultContext.authoritativeRegistry ?? this.departmentRegistry;
+  }
 
   async saveRecord(record: EpisodicMemoryRecord): Promise<void> {
     await withSessionRls(this.pool, this.defaultContext, async (client) => {
@@ -519,7 +676,7 @@ export class PostgresEpisodicStorage implements EpisodicMemoryStorage {
           record.recordedAt,
         ]
       );
-    });
+    }, this.registry);
   }
 
   async getRecordById(id: string): Promise<EpisodicMemoryRecord | undefined> {
@@ -536,7 +693,7 @@ export class PostgresEpisodicStorage implements EpisodicMemoryStorage {
       );
       if (res.rows.length === 0) return undefined;
       return this.mapRowToRecord(res.rows[0]);
-    });
+    }, this.registry);
   }
 
   async queryRecords(filter: EpisodicMemoryFilter): Promise<EpisodicMemoryRecord[]> {
@@ -589,7 +746,7 @@ export class PostgresEpisodicStorage implements EpisodicMemoryStorage {
 
       const res = await client.query(sql, params);
       return res.rows.map((row) => this.mapRowToRecord(row));
-    });
+    }, this.registry);
   }
 
   private mapRowToRecord(row: any): EpisodicMemoryRecord {
@@ -610,7 +767,7 @@ export class PostgresEpisodicStorage implements EpisodicMemoryStorage {
         [cutoffIsoDate]
       );
       return res.rowCount ?? 0;
-    });
+    }, this.registry);
   }
 
   async deleteRecords(filter: EpisodicMemoryFilter): Promise<number> {
@@ -639,7 +796,7 @@ export class PostgresEpisodicStorage implements EpisodicMemoryStorage {
       const sql = `DELETE FROM agent_episodic_memories WHERE ${conditions.join(' AND ')}`;
       const res = await client.query(sql, params);
       return res.rowCount ?? 0;
-    });
+    }, this.registry);
   }
 }
 
@@ -649,8 +806,13 @@ export class PostgresEpisodicStorage implements EpisodicMemoryStorage {
 export class PostgresSemanticStorage implements SemanticStorage {
   constructor(
     private readonly pool: Pool,
-    private readonly defaultContext: RlsSessionContext
+    private readonly defaultContext: RlsSessionContext,
+    private readonly departmentRegistry?: AuthoritativeWorkforceIdentityProvider | DepartmentRegistry
   ) {}
+
+  private get registry(): AuthoritativeWorkforceIdentityProvider | DepartmentRegistry | undefined {
+    return this.defaultContext.authoritativeRegistry ?? this.departmentRegistry;
+  }
 
   async insert(item: SemanticKnowledgeItem): Promise<void> {
     await withSessionRls(this.pool, this.defaultContext, async (client) => {
@@ -683,7 +845,7 @@ export class PostgresSemanticStorage implements SemanticStorage {
           item.createdAt ?? new Date().toISOString(),
         ]
       );
-    });
+    }, this.registry);
   }
 
   async update(item: SemanticKnowledgeItem): Promise<void> {
@@ -706,7 +868,7 @@ export class PostgresSemanticStorage implements SemanticStorage {
           item.id,
         ]
       );
-    });
+    }, this.registry);
   }
 
   async getById(id: string): Promise<SemanticKnowledgeItem | undefined> {
@@ -722,7 +884,7 @@ export class PostgresSemanticStorage implements SemanticStorage {
       );
       if (res.rows.length === 0) return undefined;
       return this.mapRowToItem(res.rows[0]);
-    });
+    }, this.registry);
   }
 
   async search(
@@ -787,7 +949,7 @@ export class PostgresSemanticStorage implements SemanticStorage {
       }
 
       return scored.sort((a, b) => b.similarity - a.similarity).slice(0, limit);
-    });
+    }, this.registry);
   }
 
   async deprecate(id: string, supersedesId?: string): Promise<void> {
@@ -798,7 +960,7 @@ export class PostgresSemanticStorage implements SemanticStorage {
          WHERE id = $2`,
         [supersedesId ?? null, id]
       );
-    });
+    }, this.registry);
   }
 
   private mapRowToItem(row: any): SemanticKnowledgeItem {
@@ -836,8 +998,13 @@ export class PostgresSemanticStorage implements SemanticStorage {
 export class PostgresProceduralStorage implements ProceduralStorage {
   constructor(
     private readonly pool: Pool,
-    private readonly defaultContext: RlsSessionContext
+    private readonly defaultContext: RlsSessionContext,
+    private readonly departmentRegistry?: AuthoritativeWorkforceIdentityProvider | DepartmentRegistry
   ) {}
+
+  private get registry(): AuthoritativeWorkforceIdentityProvider | DepartmentRegistry | undefined {
+    return this.defaultContext.authoritativeRegistry ?? this.departmentRegistry;
+  }
 
   async savePlaybook(playbook: ProceduralPlaybook): Promise<void> {
     await withSessionRls(this.pool, this.defaultContext, async (client) => {
@@ -874,7 +1041,7 @@ export class PostgresProceduralStorage implements ProceduralStorage {
           playbook.createdAt,
         ]
       );
-    });
+    }, this.registry);
   }
 
   async getPlaybookById(id: string): Promise<ProceduralPlaybook | undefined> {
@@ -890,7 +1057,7 @@ export class PostgresProceduralStorage implements ProceduralStorage {
       );
       if (res.rows.length === 0) return undefined;
       return this.mapRowToPlaybook(res.rows[0]);
-    });
+    }, this.registry);
   }
 
   async queryPlaybooks(filter: ProceduralQueryFilter): Promise<ProceduralPlaybook[]> {
@@ -930,7 +1097,7 @@ export class PostgresProceduralStorage implements ProceduralStorage {
         items = items.filter((p) => p.requiredCapabilities.includes(filter.requiredCapability!));
       }
       return items;
-    });
+    }, this.registry);
   }
 
   private mapRowToPlaybook(row: any): ProceduralPlaybook {
@@ -955,7 +1122,7 @@ export class PostgresProceduralStorage implements ProceduralStorage {
          WHERE id = $2`,
         [success, id]
       );
-    });
+    }, this.registry);
   }
 
   async approvePlaybook(id: string, approvedBy: string): Promise<void> {
@@ -966,6 +1133,6 @@ export class PostgresProceduralStorage implements ProceduralStorage {
          WHERE id = $2`,
         [approvedBy, id]
       );
-    });
+    }, this.registry);
   }
 }

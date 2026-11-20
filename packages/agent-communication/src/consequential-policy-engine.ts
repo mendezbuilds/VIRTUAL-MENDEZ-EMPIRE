@@ -1,6 +1,11 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Pool } from 'pg';
-import { applyAuthenticatedSession, clearAuthenticatedSession } from '@vme/agent-memory';
+import {
+  applyAuthenticatedSession,
+  clearAuthenticatedSession,
+  type AuthoritativeWorkforceIdentityProvider,
+} from '@vme/agent-memory';
+import { DepartmentRegistry } from '@vme/department-hierarchy';
 import {
   OWNER_PRINCIPAL_ID,
   CANONICAL_OWNER_PRINCIPAL,
@@ -395,6 +400,7 @@ export interface ConsequentialPolicyEngineOptions {
   tenantId?: string;
   policies?: Partial<Record<ConsequentialActionType, ConsequentialPolicyRule>>;
   authService?: OwnerAuthenticationService;
+  departmentRegistry?: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider;
 }
 
 /**
@@ -408,12 +414,14 @@ export class ConsequentialPolicyEngine {
   private readonly tenantId: string;
   private readonly policies: Record<ConsequentialActionType, ConsequentialPolicyRule>;
   public readonly authService: OwnerAuthenticationService;
+  public readonly departmentRegistry: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider;
 
   constructor(options?: ConsequentialPolicyEngineOptions) {
     this.pool = options?.pool;
     this.tenantId = options?.tenantId ?? '00000000-0000-0000-0000-000000000001';
     this.policies = { ...CANONICAL_CONSEQUENTIAL_POLICIES, ...(options?.policies ?? {}) };
     this.authService = options?.authService ?? new OwnerAuthenticationService();
+    this.departmentRegistry = options?.departmentRegistry ?? new DepartmentRegistry();
   }
 
   /**
@@ -464,7 +472,7 @@ export class ConsequentialPolicyEngine {
           agentId: record.agentId,
           departmentId: record.departmentId,
           principalLevel: 'SPECIALIST',
-        });
+        }, undefined, this.departmentRegistry);
 
         await client.query(
           `INSERT INTO consequential_authorization_requests (
@@ -672,7 +680,7 @@ export class ConsequentialPolicyEngine {
           tenantId: this.tenantId,
           agentCode: 'EXEC-CEO',
           principalLevel: 'EXECUTIVE',
-        });
+        }, undefined, this.departmentRegistry);
 
         const res = await client.query(
           `UPDATE consequential_authorization_requests
@@ -728,7 +736,7 @@ export class ConsequentialPolicyEngine {
           tenantId: this.tenantId,
           agentCode: 'EXEC-CEO',
           principalLevel: 'EXECUTIVE',
-        });
+        }, undefined, this.departmentRegistry);
 
         const res = await client.query(
           `SELECT id, tenant_id as "tenantId", task_id as "taskId", action_type as "actionType",
@@ -777,7 +785,7 @@ export class ConsequentialPolicyEngine {
           tenantId: this.tenantId,
           agentCode: 'EXEC-CEO',
           principalLevel: 'EXECUTIVE',
-        });
+        }, undefined, this.departmentRegistry);
 
         const res = await client.query(
           `SELECT id, tenant_id as "tenantId", task_id as "taskId", action_type as "actionType",
@@ -818,7 +826,7 @@ export class ConsequentialPolicyEngine {
           tenantId: this.tenantId,
           agentCode: 'EXEC-CEO',
           principalLevel: 'EXECUTIVE',
-        });
+        }, undefined, this.departmentRegistry);
 
         await client.query(
           `UPDATE consequential_authorization_requests

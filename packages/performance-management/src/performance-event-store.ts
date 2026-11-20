@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
-import { applyAuthenticatedSession, clearAuthenticatedSession } from '@vme/agent-memory';
+import { applyAuthenticatedSession, clearAuthenticatedSession, type AuthoritativeWorkforceIdentityProvider } from '@vme/agent-memory';
+import { DepartmentRegistry } from '@vme/department-hierarchy';
 import type { DepartmentId } from '@vme/shared-types';
 import type { PerformanceReviewRecord } from './performance-review-engine.js';
 
@@ -23,11 +24,15 @@ export interface PerformanceEvent {
 export class PerformanceEventStore {
   private inMemoryEvents: PerformanceEvent[] = [];
   private inMemoryReviews = new Map<string, PerformanceReviewRecord[]>();
+  private readonly departmentRegistry: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider;
 
   constructor(
     private readonly pool?: Pool,
-    private readonly tenantId: string = '00000000-0000-0000-0000-000000000001'
-  ) {}
+    private readonly tenantId: string = '00000000-0000-0000-0000-000000000001',
+    departmentRegistry?: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider
+  ) {
+    this.departmentRegistry = departmentRegistry ?? new DepartmentRegistry();
+  }
 
   async recordEvent(event: PerformanceEvent): Promise<PerformanceEvent> {
     const id = event.id ?? randomUUID();
@@ -49,12 +54,17 @@ export class PerformanceEventStore {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
-        await applyAuthenticatedSession(client, {
-          tenantId: this.tenantId,
-          agentId: enrichedEvent.agentId,
-          departmentId: enrichedEvent.departmentId,
-          principalLevel: 'SPECIALIST',
-        });
+        await applyAuthenticatedSession(
+          client,
+          {
+            tenantId: this.tenantId,
+            agentId: enrichedEvent.agentId,
+            departmentId: enrichedEvent.departmentId,
+            principalLevel: 'SPECIALIST',
+          },
+          undefined,
+          this.departmentRegistry
+        );
 
         await client.query(
           `INSERT INTO performance_events (
@@ -95,11 +105,16 @@ export class PerformanceEventStore {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
-        await applyAuthenticatedSession(client, {
-          tenantId: this.tenantId,
-          agentId,
-          principalLevel: 'SPECIALIST',
-        });
+        await applyAuthenticatedSession(
+          client,
+          {
+            tenantId: this.tenantId,
+            agentId,
+            principalLevel: 'SPECIALIST',
+          },
+          undefined,
+          this.departmentRegistry
+        );
 
         const conditions = ['agent_id = $1', 'tenant_id = $2'];
         const params: unknown[] = [agentId, this.tenantId];
@@ -159,11 +174,16 @@ export class PerformanceEventStore {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
-        await applyAuthenticatedSession(client, {
-          tenantId: this.tenantId,
-          agentCode: 'EXEC-CEO',
-          principalLevel: 'EXECUTIVE',
-        });
+        await applyAuthenticatedSession(
+          client,
+          {
+            tenantId: this.tenantId,
+            agentCode: 'EXEC-CEO',
+            principalLevel: 'EXECUTIVE',
+          },
+          undefined,
+          this.departmentRegistry
+        );
 
         await client.query(
           `INSERT INTO agent_performance_reviews (

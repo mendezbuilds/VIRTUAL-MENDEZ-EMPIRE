@@ -60,6 +60,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
   let appPool: Pool;
   let roPool: Pool;
   let testSandboxDir: string;
+  let canonicalRegistry: DepartmentRegistry;
 
   const tenantId = '00000000-0000-0000-0000-000000000001';
   const tenant2Id = '00000000-0000-0000-0000-000000000002';
@@ -67,6 +68,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
   const ownerMasterKey = 'vme-owner-secure-cryptographic-master-key-2026';
 
   beforeAll(async () => {
+    canonicalRegistry = new DepartmentRegistry();
     const dynamicDbSecret = randomBytes(32).toString('hex');
     process.env.DB_SESSION_SECRET = dynamicDbSecret;
     process.env.OWNER_AUTH_SECRET = ownerHmacSecret;
@@ -228,14 +230,14 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
   // ==========================================================================
   describe('3. Actual Row-Level Security Enforcement & Tenant Isolation', () => {
     it('enforces strict tenant isolation on working memory under vme_app role', async () => {
-      const workingStorage = new PostgresWorkingStorage(appPool);
+      const workingStorage = new PostgresWorkingStorage(appPool, undefined, canonicalRegistry);
 
-      const agentId = '00000000-0000-0000-0000-000000000010';
+      const agentId = '00000000-0000-0000-0000-000000000010'; // TECH-DEVOPS
       const taskId = randomUUID();
 
       // Set working memory for Tenant 1: set(ctx, taskId, agentId, key, value)
       await workingStorage.set(
-        { tenantId, agentId, principalLevel: 'SPECIALIST' },
+        { tenantId, agentId, principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry },
         taskId,
         agentId,
         'state_data',
@@ -244,7 +246,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
 
       // Verify Tenant 1 can read its value: get(ctx, taskId, key)
       const t1Val = await workingStorage.get(
-        { tenantId, agentId, principalLevel: 'SPECIALIST' },
+        { tenantId, agentId, principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry },
         taskId,
         'state_data'
       );
@@ -252,7 +254,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
 
       // Tenant 2 with same taskId and agentId CANNOT see Tenant 1 data
       const t2Val = await workingStorage.get(
-        { tenantId: tenant2Id, agentId, principalLevel: 'SPECIALIST' },
+        { tenantId: tenant2Id, agentId, principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry },
         taskId,
         'state_data'
       );
@@ -274,14 +276,14 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
     });
 
     it('enforces agent-specific access boundaries on working memory (cross-agent isolation)', async () => {
-      const workingStorage = new PostgresWorkingStorage(appPool);
-      const agentA = '00000000-0000-0000-0000-000000000021';
-      const agentB = '00000000-0000-0000-0000-000000000022';
+      const workingStorage = new PostgresWorkingStorage(appPool, undefined, canonicalRegistry);
+      const agentA = '00000000-0000-0000-0000-000000000008'; // TECH-DEV-01
+      const agentB = '00000000-0000-0000-0000-000000000009'; // TECH-QA
       const taskId = randomUUID();
 
       // Agent A sets private working memory
       await workingStorage.set(
-        { tenantId, agentId: agentA, principalLevel: 'SPECIALIST' },
+        { tenantId, agentId: agentA, principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry },
         taskId,
         agentA,
         'secret_scratch',
@@ -290,7 +292,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
 
       // Agent A can read it
       const valA = await workingStorage.get(
-        { tenantId, agentId: agentA, principalLevel: 'SPECIALIST' },
+        { tenantId, agentId: agentA, principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry },
         taskId,
         'secret_scratch'
       );
@@ -298,7 +300,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
 
       // Agent B attempts reading Agent A's working memory -> blocked by RLS
       const valB = await workingStorage.get(
-        { tenantId, agentId: agentB, principalLevel: 'SPECIALIST' },
+        { tenantId, agentId: agentB, principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry },
         taskId,
         'secret_scratch'
       );
@@ -320,27 +322,27 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
     });
 
     it('enforces episodic memory ABAC scopes (private, department, organization)', async () => {
-      const devAgent = '00000000-0000-0000-0000-000000000031';
-      const devPeer = '00000000-0000-0000-0000-000000000032';
-      const mktAgent = '00000000-0000-0000-0000-000000000033';
-      const execAgent = '00000000-0000-0000-0000-000000000001';
+      const devAgent = '00000000-0000-0000-0000-000000000008'; // TECH-ARCH
+      const devPeer = '00000000-0000-0000-0000-000000000009'; // TECH-FSE
+      const mktAgent = '00000000-0000-0000-0000-000000000013'; // MKT-CONT
+      const execAgent = '00000000-0000-0000-0000-000000000001'; // EXEC-CEO
 
-      const devContext = { tenantId, agentId: devAgent, departmentId: 'technology_engineering', principalLevel: 'SPECIALIST' };
-      const peerContext = { tenantId, agentId: devPeer, departmentId: 'technology_engineering', principalLevel: 'SPECIALIST' };
-      const mktContext = { tenantId, agentId: mktAgent, departmentId: 'marketing_growth', principalLevel: 'SPECIALIST' };
-      const execContext = { tenantId, agentCode: 'EXEC-CEO', departmentId: 'executive_office', principalLevel: 'EXECUTIVE' };
+      const devContext = { tenantId, agentId: devAgent, departmentId: 'technology_engineering', principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry };
+      const peerContext = { tenantId, agentId: devPeer, departmentId: 'technology_engineering', principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry };
+      const mktContext = { tenantId, agentId: mktAgent, departmentId: 'marketing_growth', principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry };
+      const execContext = { tenantId, agentCode: 'EXEC-CEO', departmentId: 'executive_office', principalLevel: 'EXECUTIVE', authoritativeRegistry: canonicalRegistry };
 
-      const devStorage = new PostgresEpisodicStorage(appPool, devContext);
-      const peerStorage = new PostgresEpisodicStorage(appPool, peerContext);
-      const mktStorage = new PostgresEpisodicStorage(appPool, mktContext);
-      const execStorage = new PostgresEpisodicStorage(appPool, execContext);
+      const devStorage = new PostgresEpisodicStorage(appPool, devContext, canonicalRegistry);
+      const peerStorage = new PostgresEpisodicStorage(appPool, peerContext, canonicalRegistry);
+      const mktStorage = new PostgresEpisodicStorage(appPool, mktContext, canonicalRegistry);
+      const execStorage = new PostgresEpisodicStorage(appPool, execContext, canonicalRegistry);
 
       // 1. Record AGENT_PRIVATE memory for devAgent
       const privId = randomUUID();
       await devStorage.saveRecord({
         id: privId,
         agentId: devAgent,
-        agentCode: 'TECH-DEV1',
+        agentCode: 'TECH-ARCH',
         departmentId: 'technology_engineering',
         taskId: randomUUID(),
         actionType: 'CODE_AUDIT',
@@ -367,7 +369,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
       await devStorage.saveRecord({
         id: deptId,
         agentId: devAgent,
-        agentCode: 'TECH-DEV1',
+        agentCode: 'TECH-ARCH',
         departmentId: 'technology_engineering',
         taskId: randomUUID(),
         actionType: 'INFRA_UPGRADE',
@@ -398,7 +400,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         devStorage.saveRecord({
           id: randomUUID(),
           agentId: devAgent,
-          agentCode: 'TECH-DEV1',
+          agentCode: 'TECH-ARCH',
           departmentId: 'technology_engineering',
           taskId: randomUUID(),
           actionType: 'GLOBAL_POLICY',
@@ -415,45 +417,48 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
     });
 
     it('enforces communication envelopes ABAC policy on real PostgreSQL', async () => {
-      const senderId = '00000000-0000-0000-0000-000000000041';
-      const recipientId = '00000000-0000-0000-0000-000000000042';
-      const spyId = '00000000-0000-0000-0000-000000000043';
+      const senderId = '00000000-0000-0000-0000-000000000008'; // TECH-ARCH
+      const recipientId = '00000000-0000-0000-0000-000000000009'; // TECH-FSE
+      const spyId = '00000000-0000-0000-0000-000000000013'; // MKT-CONT
       const messageId = randomUUID();
 
       // Insert message as sender
       await withSessionRls(
         appPool,
-        { tenantId, agentId: senderId, departmentId: 'executive_office', principalLevel: 'SPECIALIST' },
+        { tenantId, agentId: senderId, departmentId: 'technology_engineering', principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry },
         async (client) => {
           await client.query(`
             INSERT INTO agent_communication_envelopes (
               message_id, tenant_id, sender_agent_id, sender_agent_code, sender_department_id,
               recipient_agent_id, recipient_agent_code, recipient_department_id, type, priority,
               payload, correlation_id, delivery_status
-            ) VALUES ($1, $2, $3, 'SENDER', 'executive_office', $4, 'RECIPIENT', 'executive_office', 'TASK_DELEGATION', 'HIGH', '{}', $1, 'PENDING')
+            ) VALUES ($1, $2, $3, 'TECH-ARCH', 'technology_engineering', $4, 'TECH-FSE', 'technology_engineering', 'TASK_DELEGATION', 'HIGH', '{}', $1, 'PENDING')
           `, [messageId, tenantId, senderId, recipientId]);
-        }
+        },
+        canonicalRegistry
       );
 
       // Recipient can see the message
       const recipientCount = await withSessionRls(
         appPool,
-        { tenantId, agentId: recipientId, departmentId: 'executive_office', principalLevel: 'SPECIALIST' },
+        { tenantId, agentId: recipientId, departmentId: 'technology_engineering', principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry },
         async (client) => {
           const res = await client.query('SELECT * FROM agent_communication_envelopes WHERE message_id = $1', [messageId]);
           return res.rows.length;
-        }
+        },
+        canonicalRegistry
       );
       expect(recipientCount).toBe(1);
 
       // Unauthorized third party cannot see the message (0 rows)
       const spyCount = await withSessionRls(
         appPool,
-        { tenantId, agentId: spyId, departmentId: 'marketing_growth', principalLevel: 'SPECIALIST' },
+        { tenantId, agentId: spyId, departmentId: 'marketing_growth', principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry },
         async (client) => {
           const res = await client.query('SELECT * FROM agent_communication_envelopes WHERE message_id = $1', [messageId]);
           return res.rows.length;
-        }
+        },
+        canonicalRegistry
       );
       expect(spyCount).toBe(0);
     });
@@ -464,14 +469,14 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
   // ==========================================================================
   describe('4. Transaction-Scoped Context & Pooled Connection Reuse', () => {
     it('aborts uncommitted changes on transaction error and resets session context', async () => {
-      const workingStorage = new PostgresWorkingStorage(appPool);
+      const workingStorage = new PostgresWorkingStorage(appPool, undefined, canonicalRegistry);
       const taskId = randomUUID();
-      const agentId = randomUUID();
+      const agentId = '00000000-0000-0000-0000-000000000008'; // TECH-DEV-01
 
       await expect(
         withSessionRls(
           appPool,
-          { tenantId, agentId, principalLevel: 'SPECIALIST' },
+          { tenantId, agentId, principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry },
           async (client) => {
             await client.query(`
               INSERT INTO agent_working_memories (tenant_id, task_id, agent_id, key, value, expires_at)
@@ -479,13 +484,14 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
             `, [tenantId, taskId, agentId]);
             // Simulate error inside transaction
             throw new Error('Simulated transaction failure');
-          }
+          },
+          canonicalRegistry
         )
       ).rejects.toThrow(/Simulated transaction failure/);
 
       // Verify the row was not committed
       const val = await workingStorage.get(
-        { tenantId, agentId, principalLevel: 'SPECIALIST' },
+        { tenantId, agentId, principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry },
         taskId,
         'temp_key'
       );
@@ -557,12 +563,13 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
           departmentId: 'financial_intelligence',
           principalLevel: 'DIRECTOR' as const,
           isOwnerAuthenticated: false,
+          authoritativeRegistry: canonicalRegistry,
         };
 
         await expect(
           withSessionRls(singleConnPool, failContext, async () => {
             throw new Error('Forced transaction failure for rollback verification');
-          })
+          }, canonicalRegistry)
         ).rejects.toThrow(/Forced transaction failure for rollback verification/);
 
         // Reacquire the same physical connection again; prove no context leaked after error
@@ -752,7 +759,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
   describe('7. Durable Persistence & Process Restart Recovery Across Connections', () => {
     it('persists and recovers quad-tier memory, authorization requests, and performance events across pool destruction using vme_app', async () => {
       const restartTenantId = tenantId;
-      const agentId = randomUUID();
+      const agentId = '00000000-0000-0000-0000-000000000008'; // TECH-ARCH
       const taskId = randomUUID();
       const playbookId = randomUUID();
       const authRequestId = `req-persist-${randomUUID()}`;
@@ -761,20 +768,29 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
       const pool1 = createAppPool();
       try {
         // 1. Working memory
-        const working1 = new PostgresWorkingStorage(pool1, { tenantId: restartTenantId, agentId, principalLevel: 'SPECIALIST' });
+        const working1 = new PostgresWorkingStorage(
+          pool1,
+          { tenantId: restartTenantId, agentId, principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry },
+          canonicalRegistry
+        );
         await working1.set(taskId, 'restart_token', 'persist_ok');
 
         // 2. Episodic memory
-        const episodic1 = new PostgresEpisodicStorage(pool1, {
-          tenantId: restartTenantId,
-          agentId,
-          departmentId: 'technology_engineering',
-          principalLevel: 'SPECIALIST',
-        });
+        const episodic1 = new PostgresEpisodicStorage(
+          pool1,
+          {
+            tenantId: restartTenantId,
+            agentId,
+            departmentId: 'technology_engineering',
+            principalLevel: 'SPECIALIST',
+            authoritativeRegistry: canonicalRegistry,
+          },
+          canonicalRegistry
+        );
         await episodic1.saveRecord({
           id: randomUUID(),
           agentId,
-          agentCode: 'TECH-1',
+          agentCode: 'TECH-ARCH',
           departmentId: 'technology_engineering',
           taskId,
           actionType: 'SYSTEM_CHECK',
@@ -789,12 +805,17 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         });
 
         // 3. Semantic memory
-        const semantic1 = new PostgresSemanticStorage(pool1, {
-          tenantId: restartTenantId,
-          agentCode: 'EXEC-CEO',
-          departmentId: 'executive_office',
-          principalLevel: 'EXECUTIVE',
-        });
+        const semantic1 = new PostgresSemanticStorage(
+          pool1,
+          {
+            tenantId: restartTenantId,
+            agentCode: 'EXEC-CEO',
+            departmentId: 'executive_office',
+            principalLevel: 'EXECUTIVE',
+            authoritativeRegistry: canonicalRegistry,
+          },
+          canonicalRegistry
+        );
         await semantic1.insert({
           id: randomUUID(),
           category: 'ARCHITECTURE',
@@ -817,16 +838,21 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         });
 
         // 4. Procedural memory
-        const procedural1 = new PostgresProceduralStorage(pool1, {
-          tenantId: restartTenantId,
-          agentCode: 'EXEC-CEO',
-          departmentId: 'executive_office',
-          principalLevel: 'EXECUTIVE',
-        });
+        const procedural1 = new PostgresProceduralStorage(
+          pool1,
+          {
+            tenantId: restartTenantId,
+            agentCode: 'EXEC-CEO',
+            departmentId: 'executive_office',
+            principalLevel: 'EXECUTIVE',
+            authoritativeRegistry: canonicalRegistry,
+          },
+          canonicalRegistry
+        );
         await procedural1.savePlaybook({
           id: playbookId,
           authorAgentId: agentId,
-          authorAgentCode: 'TECH-1',
+          authorAgentCode: 'TECH-ARCH',
           authorizedBy: 'TECH-CTO',
           name: 'Disaster Recovery Playbook',
           description: 'Step-by-step restoration procedures',
@@ -855,6 +881,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         const policyEngine1 = new ConsequentialPolicyEngine({
           pool: pool1,
           tenantId: restartTenantId,
+          departmentRegistry: canonicalRegistry,
         });
         const reqPayload = { action: 'NODE_RECOVERY', target: 'cluster-01' };
         await policyEngine1.quarantineAction({
@@ -867,7 +894,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         });
 
         // 6. Performance event via PerformanceEventStore
-        const eventStore1 = new PerformanceEventStore(pool1, restartTenantId);
+        const eventStore1 = new PerformanceEventStore(pool1, restartTenantId, canonicalRegistry);
         await eventStore1.recordEvent({
           agentId,
           departmentId: 'technology_engineering',
@@ -887,28 +914,42 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
       const pool2 = createAppPool();
       try {
         // 1. Working memory recovery
-        const working2 = new PostgresWorkingStorage(pool2, { tenantId: restartTenantId, agentId, principalLevel: 'SPECIALIST' });
+        const working2 = new PostgresWorkingStorage(
+          pool2,
+          { tenantId: restartTenantId, agentId, principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry },
+          canonicalRegistry
+        );
         const val = await working2.get(taskId, 'restart_token');
         expect(val).toBe('persist_ok');
 
         // 2. Episodic memory recovery under correct agent RLS context
-        const episodic2 = new PostgresEpisodicStorage(pool2, {
-          tenantId: restartTenantId,
-          agentId,
-          departmentId: 'technology_engineering',
-          principalLevel: 'SPECIALIST',
-        });
+        const episodic2 = new PostgresEpisodicStorage(
+          pool2,
+          {
+            tenantId: restartTenantId,
+            agentId,
+            departmentId: 'technology_engineering',
+            principalLevel: 'SPECIALIST',
+            authoritativeRegistry: canonicalRegistry,
+          },
+          canonicalRegistry
+        );
         const epRecords = await episodic2.queryRecords({ agentId });
         expect(epRecords.length).toBeGreaterThanOrEqual(1);
         expect(epRecords.some((r) => r.inputSummary === 'Pre-restart diagnostics')).toBe(true);
 
         // 3. Semantic memory recovery with cosine similarity vector search
-        const semantic2 = new PostgresSemanticStorage(pool2, {
-          tenantId: restartTenantId,
-          agentId,
-          departmentId: 'technology_engineering',
-          principalLevel: 'SPECIALIST',
-        });
+        const semantic2 = new PostgresSemanticStorage(
+          pool2,
+          {
+            tenantId: restartTenantId,
+            agentId,
+            departmentId: 'technology_engineering',
+            principalLevel: 'SPECIALIST',
+            authoritativeRegistry: canonicalRegistry,
+          },
+          canonicalRegistry
+        );
         const semSearch = await semantic2.search(
           [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
           {
@@ -924,12 +965,17 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         expect(semSearch[0]?.similarity).toBeGreaterThan(0.99);
 
         // 4. Procedural memory recovery
-        const procedural2 = new PostgresProceduralStorage(pool2, {
-          tenantId: restartTenantId,
-          agentId,
-          departmentId: 'technology_engineering',
-          principalLevel: 'SPECIALIST',
-        });
+        const procedural2 = new PostgresProceduralStorage(
+          pool2,
+          {
+            tenantId: restartTenantId,
+            agentId,
+            departmentId: 'technology_engineering',
+            principalLevel: 'SPECIALIST',
+            authoritativeRegistry: canonicalRegistry,
+          },
+          canonicalRegistry
+        );
         const playbook = await procedural2.getPlaybookById(playbookId);
         expect(playbook).toBeDefined();
         expect(playbook?.isApproved).toBe(true);
@@ -938,24 +984,30 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         const policyEngine2 = new ConsequentialPolicyEngine({
           pool: pool2,
           tenantId: restartTenantId,
+          departmentRegistry: canonicalRegistry,
         });
         const authRecord = await policyEngine2.getRequestById(authRequestId);
         expect(authRecord).toBeDefined();
         expect(authRecord?.status).toBe('PENDING_OWNER_REVIEW');
 
         // 6. Performance event recovery under vme_app
-        const eventStore2 = new PerformanceEventStore(pool2, restartTenantId);
+        const eventStore2 = new PerformanceEventStore(pool2, restartTenantId, canonicalRegistry);
         const events = await eventStore2.getAgentEvents(agentId);
         expect(events.length).toBeGreaterThanOrEqual(1);
         expect(events[0]?.durationMs).toBe(420);
         expect(events[0]?.costUsd).toBe(0.003);
 
         // 7. Verify cross-tenant isolation under vme_app (foreign tenant sees 0 rows)
-        const foreignWorking = new PostgresWorkingStorage(pool2, {
-          tenantId: tenant2Id,
-          agentId,
-          principalLevel: 'SPECIALIST',
-        });
+        const foreignWorking = new PostgresWorkingStorage(
+          pool2,
+          {
+            tenantId: tenant2Id,
+            agentId,
+            principalLevel: 'SPECIALIST',
+            authoritativeRegistry: canonicalRegistry,
+          },
+          canonicalRegistry
+        );
         const foreignVal = await foreignWorking.get(taskId, 'restart_token');
         expect(foreignVal).toBeUndefined();
       } finally {
@@ -966,7 +1018,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
     it('verifies durable persistence and state recovery across genuine child process restarts under vme_app', async () => {
       const workerScript = resolve(__dirname, 'process-restart-worker.cjs');
       const childTenantId = tenantId;
-      const childAgentId = randomUUID();
+      const childAgentId = '00000000-0000-0000-0000-000000000008'; // TECH-DEV-01
       const childTaskId = randomUUID();
       const childRecordId = randomUUID();
 
@@ -1395,29 +1447,44 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
       try {
         // 4a. Registered specialist (TECH-FSE) attempts to request EXECUTIVE claims
         await expect(
-          applyAuthenticatedSession(client, {
-            tenantId,
-            agentCode: 'TECH-FSE',
-            principalLevel: 'EXECUTIVE',
-          })
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              agentCode: 'TECH-FSE',
+              principalLevel: 'EXECUTIVE',
+            },
+            undefined,
+            canonicalRegistry
+          )
         ).rejects.toThrow(/is registered with level 'SPECIALIST', not 'EXECUTIVE'\. Elevation prohibited/i);
 
         // 4b. Registered specialist attempts to request DIRECTOR claims
         await expect(
-          applyAuthenticatedSession(client, {
-            tenantId,
-            agentCode: 'TECH-FSE',
-            principalLevel: 'DIRECTOR',
-          })
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              agentCode: 'TECH-FSE',
+              principalLevel: 'DIRECTOR',
+            },
+            undefined,
+            canonicalRegistry
+          )
         ).rejects.toThrow(/is registered with level 'SPECIALIST', not 'DIRECTOR'\. Elevation prohibited/i);
 
         // 4c. Registered specialist attempts to request OWNER claims without ownerSession
         await expect(
-          applyAuthenticatedSession(client, {
-            tenantId,
-            agentCode: 'TECH-FSE',
-            isOwnerAuthenticated: true,
-          })
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              agentCode: 'TECH-FSE',
+              isOwnerAuthenticated: true,
+            },
+            undefined,
+            canonicalRegistry
+          )
         ).rejects.toThrow(/Owner claims require an authenticated Owner session/i);
       } finally {
         client.release();
@@ -1505,19 +1572,20 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         email: CANONICAL_OWNER_PRINCIPAL.email,
         credentials: ownerMasterKey,
       });
-      const specialistAgentId = randomUUID();
+      const specialistAgentId = '00000000-0000-0000-0000-000000000008'; // TECH-DEV-01
       const testTaskId = randomUUID();
 
       // 7a. Specialist writes AGENT_PRIVATE memory
       await withSessionRls(
         appPool,
-        { tenantId, agentId: specialistAgentId, principalLevel: 'SPECIALIST' },
+        { tenantId, agentId: specialistAgentId, principalLevel: 'SPECIALIST', authoritativeRegistry: canonicalRegistry },
         async (client) => {
           await client.query(`
             INSERT INTO agent_working_memories (tenant_id, task_id, agent_id, key, value, expires_at)
             VALUES ($1, $2, $3, 'legit_test_key', '"confidential_data"', NOW() + INTERVAL '1 hour')
           `, [tenantId, testTaskId, specialistAgentId]);
-        }
+        },
+        canonicalRegistry
       );
 
       // 7b. Verified Owner accesses the private memory
@@ -1545,6 +1613,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
           tenantId,
           agentCode: 'EXEC-CEO',
           principalLevel: 'EXECUTIVE',
+          authoritativeRegistry: canonicalRegistry,
         },
         async (client) => {
           const execRes = await client.query(`SELECT is_current_principal_executive() as "isExec"`);
@@ -1562,7 +1631,8 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
               10, 'SUCCESS', '{}'::jsonb, NOW()
             )
           `, [testRecordId, tenantId, randomUUID()]);
-        }
+        },
+        canonicalRegistry
       );
 
       // 7d. Specialist cannot write ORGANIZATION_WIDE episodic memory (forbidden by RLS)
@@ -1572,6 +1642,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
           tenantId,
           agentId: specialistAgentId,
           principalLevel: 'SPECIALIST',
+          authoritativeRegistry: canonicalRegistry,
         },
         async (client) => {
           await expect(
@@ -1581,14 +1652,15 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
                 action_type, input_summary, decision_rationale, outcome, scope,
                 importance_score, status, metadata, recorded_at
               ) VALUES (
-                $1, $2, $3, 'DEV-1', 'technology_engineering', $4,
+                $1, $2, $3, 'TECH-ARCH', 'technology_engineering', $4,
                 'UNAUTHORIZED_ACTION', 'Specialist trying to insert org-wide memory',
                 'Should be rejected by ABAC RLS', 'FAIL', 'ORGANIZATION_WIDE',
                 5, 'FAILURE', '{}'::jsonb, NOW()
               )
             `, [randomUUID(), tenantId, specialistAgentId, randomUUID()])
           ).rejects.toThrow(/violates row-level security policy/i);
-        }
+        },
+        canonicalRegistry
       );
     });
 
@@ -1653,6 +1725,440 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
       const permittedFuncs = appAuthFuncPerms.rows.map(r => r.routine_name);
       expect(permittedFuncs).toContain('set_authenticated_session');
       expect(permittedFuncs).toContain('clear_authenticated_session');
+    });
+  });
+
+  // ==========================================================================
+  // Section 11: Phase 2 — Issue 3: Close Remaining Agent Identity Spoofing Gaps Adversarial Verification
+  // ==========================================================================
+  describe('11. Phase 2 — Issue 3: Close Remaining Agent Identity Spoofing Gaps Adversarial Verification', () => {
+    it('1. proves an unregistered agent ID is strictly rejected under vme_app', async () => {
+      const client = await appPool.connect();
+      try {
+        const fakeAgentId = randomUUID();
+        await expect(
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              agentId: fakeAgentId,
+              principalLevel: 'SPECIALIST',
+            },
+            undefined,
+            canonicalRegistry
+          )
+        ).rejects.toThrow(
+          /cannot be resolved to an authoritative registered workforce record\. Unregistered agent identities are strictly rejected/i
+        );
+      } finally {
+        client.release();
+      }
+    });
+
+    it('2. proves a registered agent cannot claim another agent\'s ID or code under vme_app', async () => {
+      const client = await appPool.connect();
+      try {
+        const devId = '00000000-0000-0000-0000-000000000008'; // TECH-ARCH
+        // 2a. Attempting to bind TECH-ARCH ID to EXEC-CEO code
+        await expect(
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              agentId: devId,
+              agentCode: 'EXEC-CEO',
+              principalLevel: 'SPECIALIST',
+            },
+            undefined,
+            canonicalRegistry
+          )
+        ).rejects.toThrow(
+          /Identity mismatch\. Agent ID '.*' does not match agent code 'EXEC-CEO'\. A registered agent cannot claim another agent's ID/i
+        );
+
+        // 2b. Attempting to bind TECH-ARCH ID to peer TECH-FSE code
+        await expect(
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              agentId: devId,
+              agentCode: 'TECH-FSE',
+              principalLevel: 'SPECIALIST',
+            },
+            undefined,
+            canonicalRegistry
+          )
+        ).rejects.toThrow(
+          /Identity mismatch\. Agent ID '.*' does not match agent code 'TECH-FSE'\. A registered agent cannot claim another agent's ID/i
+        );
+      } finally {
+        client.release();
+      }
+    });
+
+    it('3. proves a caller cannot supply a different department for a registered agent under vme_app', async () => {
+      const client = await appPool.connect();
+      try {
+        const devId = '00000000-0000-0000-0000-000000000008'; // TECH-ARCH is registered in 'technology_engineering'
+        // Caller attempts to spoof department as 'financial_intelligence'
+        await expect(
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              agentId: devId,
+              departmentId: 'financial_intelligence',
+              principalLevel: 'SPECIALIST',
+            },
+            undefined,
+            canonicalRegistry
+          )
+        ).rejects.toThrow(
+          /Caller-supplied departmentId 'financial_intelligence' does not match registered department 'technology_engineering'/i
+        );
+
+        // Caller attempts to spoof department as 'executive_office'
+        await expect(
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              agentId: devId,
+              departmentId: 'executive_office',
+              principalLevel: 'SPECIALIST',
+            },
+            undefined,
+            canonicalRegistry
+          )
+        ).rejects.toThrow(
+          /Caller-supplied departmentId 'executive_office' does not match registered department 'technology_engineering'/i
+        );
+      } finally {
+        client.release();
+      }
+    });
+
+    it('4. proves a missing agent identity cannot obtain an agent-scoped claim under vme_app', async () => {
+      const client = await appPool.connect();
+      try {
+        // Omit both agentId and agentCode for non-owner
+        await expect(
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              principalLevel: 'SPECIALIST',
+            },
+            undefined,
+            canonicalRegistry
+          )
+        ).rejects.toThrow(
+          /Missing agent identity\. An agent-scoped database session requires an authenticated, registered agent identity \(agentId or agentCode\)/i
+        );
+      } finally {
+        client.release();
+      }
+    });
+
+    it('5. proves a fabricated registry cannot grant Executive or Director privileges under vme_app', async () => {
+      const client = await appPool.connect();
+      try {
+        // 5a. Fabricated registry that promotes an ordinary specialist (TECH-ARCH) to EXECUTIVE
+        const fabricatedExecRegistry = {
+          getAgentRecord(idOrCode: string) {
+            return {
+              id: '00000000-0000-0000-0000-000000000008',
+              agentCode: 'TECH-ARCH',
+              departmentId: 'technology_engineering' as const,
+              role: 'SoftwareArchitectBot',
+              title: 'Lead Software Architect',
+              level: 'EXECUTIVE' as const, // Fabricated elevation!
+              purpose: 'Fabricated elevation attempt',
+              supervisor: { reportsToOwner: false },
+              responsibilities: [],
+              capabilities: [],
+              permissionProfile: {} as any,
+              systemPromptTemplate: '',
+              operationalStatus: 'ACTIVE' as const,
+              currentConfig: {},
+              leadershipHistory: [], // Missing Owner appointment!
+            };
+          },
+        };
+
+        await expect(
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              agentCode: 'TECH-ARCH',
+              principalLevel: 'EXECUTIVE',
+            },
+            undefined,
+            fabricatedExecRegistry as any
+          )
+        ).rejects.toThrow(
+          /Fabricated or unverified registry cannot grant Executive privileges/i
+        );
+
+        // 5b. Fabricated registry defining a completely fake executive (EXEC-ROGUE)
+        const rogueExecRegistry = {
+          getAgentRecord(idOrCode: string) {
+            return {
+              id: randomUUID(),
+              agentCode: 'EXEC-ROGUE',
+              departmentId: 'executive_office' as const,
+              role: 'RogueExecutive',
+              title: 'Rogue Autonomous Executive',
+              level: 'EXECUTIVE' as const,
+              purpose: 'Rogue takeover attempt',
+              supervisor: { reportsToOwner: false },
+              responsibilities: [],
+              capabilities: [],
+              permissionProfile: {} as any,
+              systemPromptTemplate: '',
+              operationalStatus: 'ACTIVE' as const,
+              currentConfig: {},
+              leadershipHistory: [],
+            };
+          },
+        };
+
+        await expect(
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              agentCode: 'EXEC-ROGUE',
+              principalLevel: 'EXECUTIVE',
+            },
+            undefined,
+            rogueExecRegistry as any
+          )
+        ).rejects.toThrow(
+          /is not a registered workforce agent in authoritative canonical records|Fabricated or unverified registry cannot grant Executive privileges/i
+        );
+
+        // 5c. Fabricated registry promoting a specialist to DIRECTOR without valid appointment
+        const fabricatedDirRegistry = {
+          getAgentRecord(idOrCode: string) {
+            return {
+              id: '00000000-0000-0000-0000-000000000008',
+              agentCode: 'TECH-ARCH',
+              departmentId: 'technology_engineering' as const,
+              role: 'SoftwareArchitectBot',
+              title: 'Promoted to Director',
+              level: 'DIRECTOR' as const, // Fabricated elevation!
+              purpose: 'Fabricated director elevation attempt',
+              supervisor: { reportsToOwner: false },
+              responsibilities: [],
+              capabilities: [],
+              permissionProfile: {} as any,
+              systemPromptTemplate: '',
+              operationalStatus: 'ACTIVE' as const,
+              currentConfig: {},
+              leadershipHistory: [], // Missing Director appointment!
+            };
+          },
+        };
+
+        await expect(
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              agentCode: 'TECH-ARCH',
+              principalLevel: 'DIRECTOR',
+            },
+            undefined,
+            fabricatedDirRegistry as any
+          )
+        ).rejects.toThrow(
+          /Fabricated or unverified registry cannot grant Director privileges/i
+        );
+
+        // 5d. Fabricated registry transferring an agent to another department without valid transfer history
+        const fabricatedTransferRegistry = {
+          getAgentRecord(idOrCode: string) {
+            return {
+              id: '00000000-0000-0000-0000-000000000008',
+              agentCode: 'TECH-ARCH',
+              departmentId: 'financial_intelligence' as const, // Spoofed transfer!
+              role: 'SoftwareArchitectBot',
+              title: 'Lead Software Architect',
+              level: 'SPECIALIST' as const,
+              purpose: 'Fabricated transfer attempt',
+              supervisor: { reportsToOwner: false },
+              responsibilities: [],
+              capabilities: [],
+              permissionProfile: {} as any,
+              systemPromptTemplate: '',
+              operationalStatus: 'ACTIVE' as const,
+              currentConfig: { departmentTransferHistory: [] }, // No authorized transfer!
+              leadershipHistory: [],
+            };
+          },
+        };
+
+        await expect(
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              agentCode: 'TECH-ARCH',
+              principalLevel: 'SPECIALIST',
+            },
+            undefined,
+            fabricatedTransferRegistry as any
+          )
+        ).rejects.toThrow(
+          /differs from canonical origin 'technology_engineering' without authorized transfer history/i
+        );
+      } finally {
+        client.release();
+      }
+    });
+
+    it('6. proves legitimate registered Specialist, Director, Executive, and authenticated Owner sessions continue to work under vme_app', async () => {
+      const client = await appPool.connect();
+      try {
+        // 6a. Legitimate registered Specialist (TECH-ARCH)
+        await applyAuthenticatedSession(
+          client,
+          {
+            tenantId,
+            agentCode: 'TECH-ARCH',
+            principalLevel: 'SPECIALIST',
+          },
+          undefined,
+          canonicalRegistry
+        );
+
+        const specialistCheck = await client.query(`
+          SELECT 
+            is_current_principal_owner() as "isOwner",
+            is_current_principal_executive() as "isExec",
+            get_current_agent_id() as "agentId",
+            get_current_department_id() as "deptId",
+            current_setting('app.current_principal_level', true) as "level"
+        `);
+        expect(specialistCheck.rows[0].isOwner).toBe(false);
+        expect(specialistCheck.rows[0].isExec).toBe(false);
+        expect(specialistCheck.rows[0].agentId).toBe('00000000-0000-0000-0000-000000000008');
+        expect(specialistCheck.rows[0].deptId).toBe('technology_engineering');
+        expect(specialistCheck.rows[0].level).toBe('SPECIALIST');
+
+        // Verify specialist can write and read own working memory under RLS
+        const testTaskId = randomUUID();
+        await client.query(`
+          INSERT INTO agent_working_memories (tenant_id, task_id, agent_id, key, value, expires_at)
+          VALUES ($1, $2, '00000000-0000-0000-0000-000000000008', 'spec_key_issue3', '"spec_val_issue3"', NOW() + INTERVAL '1 hour')
+        `, [tenantId, testTaskId]);
+
+        const readRes = await client.query(`
+          SELECT value FROM agent_working_memories
+          WHERE tenant_id = $1 AND task_id = $2 AND key = 'spec_key_issue3'
+        `, [tenantId, testTaskId]);
+        expect(readRes.rows[0]?.value).toBe('spec_val_issue3');
+
+        await clearAuthenticatedSession(client);
+
+        // 6b. Legitimate registered Director (TECH-CTO)
+        await applyAuthenticatedSession(
+          client,
+          {
+            tenantId,
+            agentCode: 'TECH-CTO',
+            principalLevel: 'DIRECTOR',
+          },
+          undefined,
+          canonicalRegistry
+        );
+
+        const dirCheck = await client.query(`
+          SELECT 
+            is_current_principal_owner() as "isOwner",
+            is_current_principal_executive() as "isExec",
+            get_current_agent_id() as "agentId",
+            get_current_department_id() as "deptId",
+            current_setting('app.current_principal_level', true) as "level"
+        `);
+        expect(dirCheck.rows[0].isOwner).toBe(false);
+        expect(dirCheck.rows[0].isExec).toBe(false);
+        expect(dirCheck.rows[0].agentId).toBe('00000000-0000-0000-0000-000000000007');
+        expect(dirCheck.rows[0].deptId).toBe('technology_engineering');
+        expect(dirCheck.rows[0].level).toBe('DIRECTOR');
+
+        await clearAuthenticatedSession(client);
+
+        // 6c. Legitimate registered Executive (EXEC-CEO)
+        await applyAuthenticatedSession(
+          client,
+          {
+            tenantId,
+            agentCode: 'EXEC-CEO',
+            principalLevel: 'EXECUTIVE',
+          },
+          undefined,
+          canonicalRegistry
+        );
+
+        const execCheck = await client.query(`
+          SELECT 
+            is_current_principal_owner() as "isOwner",
+            is_current_principal_executive() as "isExec",
+            get_current_agent_id() as "agentId",
+            get_current_department_id() as "deptId",
+            current_setting('app.current_principal_level', true) as "level"
+        `);
+        expect(execCheck.rows[0].isOwner).toBe(false);
+        expect(execCheck.rows[0].isExec).toBe(true);
+        expect(execCheck.rows[0].agentId).toBe('00000000-0000-0000-0000-000000000001');
+        expect(execCheck.rows[0].deptId).toBe('executive_office');
+        expect(execCheck.rows[0].level).toBe('EXECUTIVE');
+
+        await clearAuthenticatedSession(client);
+
+        // 6d. Authenticated Human Owner
+        const authService = new OwnerAuthenticationService({ secretKey: ownerHmacSecret, requiredCredentials: ownerMasterKey });
+        const ownerSession = authService.createOwnerSession({
+          principalId: OWNER_PRINCIPAL_ID,
+          email: CANONICAL_OWNER_PRINCIPAL.email,
+          credentials: ownerMasterKey,
+        });
+
+        await applyAuthenticatedSession(
+          client,
+          {
+            tenantId,
+            agentId: OWNER_PRINCIPAL_ID,
+            principalLevel: 'OWNER',
+            isOwnerAuthenticated: true,
+            ownerSession,
+          },
+          undefined,
+          canonicalRegistry
+        );
+
+        const ownerCheck = await client.query(`
+          SELECT 
+            is_current_principal_owner() as "isOwner",
+            is_current_principal_executive() as "isExec",
+            get_current_agent_id() as "agentId",
+            get_current_department_id() as "deptId",
+            current_setting('app.current_principal_level', true) as "level"
+        `);
+        expect(ownerCheck.rows[0].isOwner).toBe(true);
+        expect(ownerCheck.rows[0].isExec).toBe(true);
+        expect(ownerCheck.rows[0].agentId).toBe(OWNER_PRINCIPAL_ID);
+        expect(ownerCheck.rows[0].deptId).toBe('executive_office');
+        expect(ownerCheck.rows[0].level).toBe('OWNER');
+
+        await clearAuthenticatedSession(client);
+      } finally {
+        client.release();
+      }
     });
   });
 });

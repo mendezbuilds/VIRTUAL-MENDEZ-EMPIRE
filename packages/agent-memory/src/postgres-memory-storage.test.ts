@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { newDb, DataType } from 'pg-mem';
 import type { Pool } from 'pg';
 import { randomUUID } from 'node:crypto';
+import { DepartmentRegistry } from '@vme/department-hierarchy';
 import {
   PostgresWorkingStorage,
   PostgresEpisodicStorage,
@@ -15,10 +16,11 @@ import { IncompatibleEmbeddingError } from './semantic-memory.js';
 
 describe('Postgres Memory Storage & Adversarial RLS / Isolation Tests', () => {
   let pool: Pool;
+  let registry: DepartmentRegistry;
   const tenant1 = '11111111-1111-1111-1111-111111111111';
   const tenant2 = '22222222-2222-2222-2222-222222222222';
-  const agentA = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-  const agentB = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+  const agentA = '00000000-0000-0000-0000-000000000008'; // TECH-DEV-01
+  const agentB = '00000000-0000-0000-0000-000000000009'; // TECH-QA
 
   beforeEach(() => {
     process.env.DB_SESSION_SECRET = 'test-secret-with-at-least-32-chars-entropy-abc123';
@@ -153,12 +155,13 @@ describe('Postgres Memory Storage & Adversarial RLS / Isolation Tests', () => {
 
     const { Pool: PgPool } = db.adapters.createPg();
     pool = new PgPool() as unknown as Pool;
+    registry = new DepartmentRegistry();
   });
 
   describe('PostgresWorkingStorage', () => {
     it('sets, gets, and respects TTL expiration', async () => {
-      const storage = new PostgresWorkingStorage(pool);
-      const ctx = { tenantId: tenant1, agentId: agentA };
+      const storage = new PostgresWorkingStorage(pool, undefined, registry);
+      const ctx = { tenantId: tenant1, agentId: agentA, departmentId: 'technology_engineering', principalLevel: 'SPECIALIST', authoritativeRegistry: registry };
       const expiresAtFuture = new Date(Date.now() + 3600 * 1000);
 
       await storage.set(ctx, 'task-101', agentA, 'plan', { step: 1, action: 'research' }, expiresAtFuture);
@@ -174,9 +177,9 @@ describe('Postgres Memory Storage & Adversarial RLS / Isolation Tests', () => {
     });
 
     it('enforces tenant boundary isolation', async () => {
-      const storage = new PostgresWorkingStorage(pool);
-      const ctx1 = { tenantId: tenant1, agentId: agentA };
-      const ctx2 = { tenantId: tenant2, agentId: agentA };
+      const storage = new PostgresWorkingStorage(pool, undefined, registry);
+      const ctx1 = { tenantId: tenant1, agentId: agentA, departmentId: 'technology_engineering', principalLevel: 'SPECIALIST', authoritativeRegistry: registry };
+      const ctx2 = { tenantId: tenant2, agentId: agentA, departmentId: 'technology_engineering', principalLevel: 'SPECIALIST', authoritativeRegistry: registry };
       const expiresAt = new Date(Date.now() + 3600 * 1000);
 
       await storage.set(ctx1, 'task-isolation', agentA, 'secret_key', 'agentA_val', expiresAt);
@@ -189,11 +192,15 @@ describe('Postgres Memory Storage & Adversarial RLS / Isolation Tests', () => {
 
   describe('PostgresEpisodicStorage', () => {
     it('records episodic records and queries by filter', async () => {
-      const storage = new PostgresEpisodicStorage(pool, { tenantId: tenant1 });
+      const storage = new PostgresEpisodicStorage(
+        pool,
+        { tenantId: tenant1, agentId: agentA, departmentId: 'technology_engineering', principalLevel: 'SPECIALIST', authoritativeRegistry: registry },
+        registry
+      );
       const record = {
         id: randomUUID(),
         agentId: agentA,
-        agentCode: 'SPEC-01',
+        agentCode: 'TECH-ARCH',
         departmentId: 'technology_engineering' as const,
         taskId: randomUUID(),
         actionType: 'CODE_REFACTOR',
@@ -217,17 +224,21 @@ describe('Postgres Memory Storage & Adversarial RLS / Isolation Tests', () => {
       });
 
       expect(queried).toHaveLength(1);
-      expect(queried[0]?.agentCode).toBe('SPEC-01');
+      expect(queried[0]?.agentCode).toBe('TECH-ARCH');
       expect(queried[0]?.outcome).toContain('100% tests passing');
     });
 
     it('archives records older than cutoff timestamp', async () => {
-      const storage = new PostgresEpisodicStorage(pool, { tenantId: tenant1 });
+      const storage = new PostgresEpisodicStorage(
+        pool,
+        { tenantId: tenant1, agentId: agentA, departmentId: 'technology_engineering', principalLevel: 'SPECIALIST', authoritativeRegistry: registry },
+        registry
+      );
       const oldTime = new Date(Date.now() - 100000).toISOString();
       await storage.saveRecord({
         id: randomUUID(),
         agentId: agentA,
-        agentCode: 'SPEC-01',
+        agentCode: 'TECH-ARCH',
         departmentId: 'technology_engineering' as const,
         taskId: randomUUID(),
         actionType: 'OLD_ACTION',
@@ -248,7 +259,11 @@ describe('Postgres Memory Storage & Adversarial RLS / Isolation Tests', () => {
 
   describe('PostgresSemanticStorage', () => {
     it('stores semantic knowledge and performs cosine similarity ranking', async () => {
-      const storage = new PostgresSemanticStorage(pool, { tenantId: tenant1 });
+      const storage = new PostgresSemanticStorage(
+        pool,
+        { tenantId: tenant1, agentCode: 'EXEC-CEO', departmentId: 'executive_office', principalLevel: 'EXECUTIVE', authoritativeRegistry: registry },
+        registry
+      );
       const itemId = randomUUID();
       await storage.insert({
         id: itemId,
@@ -292,7 +307,11 @@ describe('Postgres Memory Storage & Adversarial RLS / Isolation Tests', () => {
     });
 
     it('rejects dimension mismatch during search', async () => {
-      const storage = new PostgresSemanticStorage(pool, { tenantId: tenant1 });
+      const storage = new PostgresSemanticStorage(
+        pool,
+        { tenantId: tenant1, agentCode: 'EXEC-CEO', departmentId: 'executive_office', principalLevel: 'EXECUTIVE', authoritativeRegistry: registry },
+        registry
+      );
       await expect(
         storage.search(
           [0.5, 0.5], // 2 dims
@@ -309,7 +328,11 @@ describe('Postgres Memory Storage & Adversarial RLS / Isolation Tests', () => {
 
   describe('PostgresProceduralStorage', () => {
     it('stores, queries, and updates execution metrics', async () => {
-      const storage = new PostgresProceduralStorage(pool, { tenantId: tenant1 });
+      const storage = new PostgresProceduralStorage(
+        pool,
+        { tenantId: tenant1, agentCode: 'EXEC-CEO', departmentId: 'executive_office', principalLevel: 'EXECUTIVE', authoritativeRegistry: registry },
+        registry
+      );
       const playbookId = randomUUID();
       await storage.savePlaybook({
         id: playbookId,
