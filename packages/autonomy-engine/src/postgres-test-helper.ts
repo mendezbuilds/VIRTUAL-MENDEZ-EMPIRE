@@ -136,6 +136,7 @@ export async function executeRealMigrations(pool: Pool): Promise<string[]> {
     '002_agent_memory_schema.sql',
     '003_durable_communication_and_execution.sql',
     '004_least_privilege_roles.sql',
+    '005_secure_database_identity.sql',
   ];
 
   const executed: string[] = [];

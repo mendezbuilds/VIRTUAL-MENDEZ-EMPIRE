@@ -1,19 +1,60 @@
 /**
  * Autonomous Multi-Process Restart Verification Worker
  * Executed in genuine isolated child processes to prove that
- * application state persists across real process deaths and restarts.
+ * application state persists across real process deaths and restarts,
+ * and that unauthenticated GUC tampering cannot elevate privileges.
  */
 const { Pool } = require('pg');
+const crypto = require('node:crypto');
 
-const mode = process.argv[2]; // 'write' or 'read'
+const mode = process.argv[2]; // 'write', 'read', or 'tamper'
 const tenantId = process.argv[3];
 const agentId = process.argv[4];
 const taskId = process.argv[5];
 const recordId = process.argv[6] || '00000000-0000-0000-0000-000000000999';
 
 if (!mode || !tenantId || !agentId || !taskId) {
-  console.error('Usage: node process-restart-worker.cjs <write|read> <tenantId> <agentId> <taskId> [recordId]');
+  console.error('Usage: node process-restart-worker.cjs <write|read|tamper> <tenantId> <agentId> <taskId> [recordId]');
   process.exit(1);
+}
+
+const DB_SESSION_SECRET = process.env.DB_SESSION_SECRET || 'vme-canonical-db-auth-hmac-secret-2026';
+
+function signClaims(claims) {
+  const canonical = [
+    claims.tenantId || '',
+    claims.agentId || '',
+    claims.departmentId || '',
+    claims.principalLevel || 'SPECIALIST',
+    claims.isOwner ? 'true' : 'false',
+    String(claims.expiresAt || 0),
+    claims.nonce || '',
+  ].join(':');
+
+  const signature = crypto.createHmac('sha256', DB_SESSION_SECRET).update(canonical).digest('hex');
+  return {
+    claimsPayload: claims,
+    signature,
+  };
+}
+
+async function setWorkerSession(client, context) {
+  const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+  const nonce = crypto.randomBytes(8).toString('hex');
+  const { claimsPayload, signature } = signClaims({
+    tenantId: context.tenantId,
+    agentId: context.agentId,
+    departmentId: context.departmentId || 'technology_engineering',
+    principalLevel: context.principalLevel || 'EXECUTIVE',
+    isOwner: context.isOwner === true,
+    expiresAt,
+    nonce,
+  });
+
+  await client.query(`SELECT set_authenticated_session($1::jsonb, $2)`, [
+    JSON.stringify(claimsPayload),
+    signature,
+  ]);
 }
 
 const pool = new Pool({
@@ -29,16 +70,63 @@ const pool = new Pool({
 async function run() {
   const client = await pool.connect();
   try {
-    if (mode === 'write') {
+    if (mode === 'tamper') {
+      // Adversarial test: child process tries to elevate to Owner/Executive merely by setting GUC values
       await client.query('BEGIN');
       await client.query(`
         SELECT 
           set_config('app.current_tenant_id', $1, true),
           set_config('app.current_agent_id', $2, true),
-          set_config('app.current_department_id', 'technology_engineering', true),
-          set_config('app.current_principal_level', 'EXECUTIVE', true),
+          set_config('app.current_department_id', 'executive_office', true),
+          set_config('app.current_principal_level', 'OWNER', true),
           set_config('app.is_owner_authenticated', 'true', true)
       `, [tenantId, agentId]);
+
+      const checkRes = await client.query(`
+        SELECT 
+          is_current_principal_owner() as is_owner,
+          is_current_principal_executive() as is_exec,
+          get_current_tenant_id() as tenant_id
+      `);
+
+      const row = checkRes.rows[0];
+      if (row.is_owner === true || row.is_exec === true || row.tenant_id) {
+        throw new Error(`SECURITY BREACH: Child process obtained elevated privileges via GUC setting: ${JSON.stringify(row)}`);
+      }
+
+      // Also verify write is rejected by RLS because verified tenant_id is NULL
+      let rlsRejected = false;
+      try {
+        await client.query(`
+          INSERT INTO agent_working_memories (tenant_id, task_id, agent_id, key, value, expires_at)
+          VALUES ($1, $2, $3, 'tamper_key', '"val"', NOW() + INTERVAL '1 hour')
+        `, [tenantId, taskId, agentId]);
+      } catch (err) {
+        if (/violates row-level security policy/i.test(err.message)) {
+          rlsRejected = true;
+        } else {
+          throw err;
+        }
+      }
+
+      if (!rlsRejected) {
+        throw new Error('SECURITY BREACH: Child process successfully inserted row without cryptographically verified session');
+      }
+
+      await client.query('ROLLBACK');
+      console.log('TAMPER_BLOCKED_SUCCESSFULLY');
+      return;
+    }
+
+    if (mode === 'write') {
+      await client.query('BEGIN');
+      await setWorkerSession(client, {
+        tenantId,
+        agentId,
+        departmentId: 'technology_engineering',
+        principalLevel: 'EXECUTIVE',
+        isOwner: true,
+      });
 
       // 1. Working memory
       await client.query(`
@@ -118,14 +206,13 @@ async function run() {
       console.log('WRITE_COMPLETE');
     } else if (mode === 'read') {
       await client.query('BEGIN');
-      await client.query(`
-        SELECT 
-          set_config('app.current_tenant_id', $1, true),
-          set_config('app.current_agent_id', $2, true),
-          set_config('app.current_department_id', 'technology_engineering', true),
-          set_config('app.current_principal_level', 'EXECUTIVE', true),
-          set_config('app.is_owner_authenticated', 'true', true)
-      `, [tenantId, agentId]);
+      await setWorkerSession(client, {
+        tenantId,
+        agentId,
+        departmentId: 'technology_engineering',
+        principalLevel: 'EXECUTIVE',
+        isOwner: true,
+      });
 
       // 1. Verify working memory
       const wmRes = await client.query(`
@@ -177,7 +264,11 @@ async function run() {
       }
 
       // 7. Verify cross-tenant isolation under vme_app (RLS returns 0 rows)
-      await client.query(`SELECT set_config('app.current_tenant_id', '00000000-0000-0000-0000-000000000002', true)`);
+      await setWorkerSession(client, {
+        tenantId: '00000000-0000-0000-0000-000000000002',
+        agentId,
+        principalLevel: 'SPECIALIST',
+      });
       const crossTenantRes = await client.query(`SELECT * FROM agent_working_memories WHERE key = 'process_token'`);
       if (crossTenantRes.rows.length !== 0) {
         throw new Error(`Cross-tenant RLS isolation failed: foreign tenant saw ${crossTenantRes.rows.length} rows`);
@@ -187,6 +278,11 @@ async function run() {
       console.log('READ_COMPLETE');
     }
   } finally {
+    try {
+      await client.query('SELECT clear_authenticated_session()');
+    } catch {
+      // ignore
+    }
     client.release();
     await pool.end();
   }

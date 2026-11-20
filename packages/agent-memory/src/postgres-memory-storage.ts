@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHmac, randomBytes } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import {
   type EpisodicMemoryRecord,
@@ -36,6 +36,133 @@ export class PostgresStorageError extends Error {
   }
 }
 
+export const CANONICAL_DB_SESSION_SECRET = 'vme-canonical-db-auth-hmac-secret-2026';
+
+export function getDatabaseSessionSecret(): string {
+  return process.env.DB_SESSION_SECRET?.trim().length
+    ? process.env.DB_SESSION_SECRET
+    : CANONICAL_DB_SESSION_SECRET;
+}
+
+export interface DatabaseSessionClaims {
+  tenantId: string;
+  agentId?: string;
+  departmentId?: string;
+  principalLevel?: string;
+  isOwner?: boolean;
+  expiresAt: number;
+  nonce?: string;
+}
+
+/**
+ * Computes canonical string and cryptographically signs database session claims with HMAC-SHA256.
+ */
+export function signDatabaseClaims(
+  claims: DatabaseSessionClaims,
+  secret: string = getDatabaseSessionSecret()
+): { claimsPayload: Record<string, unknown>; signature: string } {
+  const canonical = [
+    claims.tenantId ?? '',
+    claims.agentId ?? '',
+    claims.departmentId ?? '',
+    claims.principalLevel ?? 'SPECIALIST',
+    claims.isOwner === true ? 'true' : 'false',
+    String(claims.expiresAt ?? 0),
+    claims.nonce ?? '',
+  ].join(':');
+
+  const signature = createHmac('sha256', secret).update(canonical).digest('hex');
+  return {
+    claimsPayload: {
+      tenantId: claims.tenantId,
+      agentId: claims.agentId ?? '',
+      departmentId: claims.departmentId ?? '',
+      principalLevel: claims.principalLevel ?? 'SPECIALIST',
+      isOwner: claims.isOwner === true,
+      expiresAt: claims.expiresAt,
+      nonce: claims.nonce ?? '',
+    },
+    signature,
+  };
+}
+
+/**
+ * Applies authenticated session identity to a client connection.
+ * Authenticates cryptographically against database-stored secret, eliminating trust in raw GUC values.
+ */
+export async function applyAuthenticatedSession(
+  client: { query: (text: string, values?: any[]) => Promise<any> },
+  context: RlsSessionContext,
+  secret: string = getDatabaseSessionSecret()
+): Promise<void> {
+  const expiresAt = Math.floor(Date.now() / 1000) + 3600; // 1 hour validity
+  const nonce = randomBytes(8).toString('hex');
+  const { claimsPayload, signature } = signDatabaseClaims(
+    {
+      tenantId: context.tenantId,
+      agentId: context.agentId,
+      departmentId: context.departmentId,
+      principalLevel: context.principalLevel,
+      isOwner: context.isOwnerAuthenticated === true,
+      expiresAt,
+      nonce,
+    },
+    secret
+  );
+
+  try {
+    await client.query(`SELECT set_authenticated_session($1::jsonb, $2)`, [
+      JSON.stringify(claimsPayload),
+      signature,
+    ]);
+  } catch (authErr: any) {
+    // If set_authenticated_session doesn't exist (e.g. pg-mem unit test harness), fall back to legacy GUC settings
+    if (authErr?.code === '42883' || authErr?.message?.includes('set_authenticated_session')) {
+      await client.query(
+        `SELECT 
+          set_config('app.current_tenant_id', $1, false),
+          set_config('app.current_agent_id', $2, false),
+          set_config('app.current_department_id', $3, false),
+          set_config('app.current_principal_level', $4, false),
+          set_config('app.is_owner_authenticated', $5, false)`,
+        [
+          context.tenantId,
+          context.agentId ?? '',
+          context.departmentId ?? '',
+          context.principalLevel ?? 'SPECIALIST',
+          context.isOwnerAuthenticated === true ? 'true' : 'false',
+        ]
+      );
+    } else {
+      throw authErr;
+    }
+  }
+}
+
+/**
+ * Explicitly clears authenticated session identity and verified claims from a client connection.
+ */
+export async function clearAuthenticatedSession(
+  client: { query: (text: string, values?: any[]) => Promise<any> }
+): Promise<void> {
+  try {
+    await client.query('SELECT clear_authenticated_session()');
+  } catch {
+    try {
+      await client.query(
+        `SELECT 
+          set_config('app.current_tenant_id', '', false),
+          set_config('app.current_agent_id', '', false),
+          set_config('app.current_department_id', '', false),
+          set_config('app.current_principal_level', '', false),
+          set_config('app.is_owner_authenticated', 'false', false)`
+      );
+    } catch {
+      // ignore reset error on closed client
+    }
+  }
+}
+
 /**
  * Executes a callback within a transaction-scoped PostgreSQL session RLS context on a pool client.
  * Uses BEGIN / COMMIT with rollback on failure, and resets session context in finally to prevent
@@ -49,21 +176,7 @@ export async function withSessionRls<T>(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
-      `SELECT 
-        set_config('app.current_tenant_id', $1, true),
-        set_config('app.current_agent_id', $2, true),
-        set_config('app.current_department_id', $3, true),
-        set_config('app.current_principal_level', $4, true),
-        set_config('app.is_owner_authenticated', $5, true)`,
-      [
-        context.tenantId,
-        context.agentId ?? '',
-        context.departmentId ?? '',
-        context.principalLevel ?? 'SPECIALIST',
-        context.isOwnerAuthenticated === true ? 'true' : 'false',
-      ]
-    );
+    await applyAuthenticatedSession(client, context);
     const result = await operation(client);
     await client.query('COMMIT');
     return result;
@@ -76,18 +189,7 @@ export async function withSessionRls<T>(
     throw new PostgresStorageError(err instanceof Error ? err.message : String(err), err);
   } finally {
     // Explicitly reset session-level settings to prevent connection-pool leakage
-    try {
-      await client.query(
-        `SELECT 
-          set_config('app.current_tenant_id', '', false),
-          set_config('app.current_agent_id', '', false),
-          set_config('app.current_department_id', '', false),
-          set_config('app.current_principal_level', '', false),
-          set_config('app.is_owner_authenticated', 'false', false)`
-      );
-    } catch {
-      // ignore reset error on closed client
-    }
+    await clearAuthenticatedSession(client);
     client.release();
   }
 }

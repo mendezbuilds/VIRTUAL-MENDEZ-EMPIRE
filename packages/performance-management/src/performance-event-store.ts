@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
+import { applyAuthenticatedSession, clearAuthenticatedSession } from '@vme/agent-memory';
 import type { DepartmentId } from '@vme/shared-types';
 import type { PerformanceReviewRecord } from './performance-review-engine.js';
 
@@ -48,16 +49,12 @@ export class PerformanceEventStore {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', $1, false),
-              set_config('app.current_agent_id', $2, false)`,
-            [this.tenantId, enrichedEvent.agentId]
-          );
-        } catch {
-          // ignore in pg-mem
-        }
+        await applyAuthenticatedSession(client, {
+          tenantId: this.tenantId,
+          agentId: enrichedEvent.agentId,
+          departmentId: enrichedEvent.departmentId,
+          principalLevel: 'SPECIALIST',
+        });
 
         await client.query(
           `INSERT INTO performance_events (
@@ -82,15 +79,7 @@ export class PerformanceEventStore {
           ]
         );
       } finally {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', '', false),
-              set_config('app.current_agent_id', '', false)`
-          );
-        } catch {
-          // ignore
-        }
+        await clearAuthenticatedSession(client);
         client.release();
       }
     }
@@ -106,16 +95,11 @@ export class PerformanceEventStore {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', $1, false),
-              set_config('app.current_agent_id', $2, false)`,
-            [this.tenantId, agentId]
-          );
-        } catch {
-          // ignore in pg-mem
-        }
+        await applyAuthenticatedSession(client, {
+          tenantId: this.tenantId,
+          agentId,
+          principalLevel: 'SPECIALIST',
+        });
 
         const conditions = ['agent_id = $1', 'tenant_id = $2'];
         const params: unknown[] = [agentId, this.tenantId];
@@ -151,15 +135,7 @@ export class PerformanceEventStore {
           recordedAt: row.recordedAt instanceof Date ? row.recordedAt.toISOString() : String(row.recordedAt),
         }));
       } finally {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', '', false),
-              set_config('app.current_agent_id', '', false)`
-          );
-        } catch {
-          // ignore
-        }
+        await clearAuthenticatedSession(client);
         client.release();
       }
     }
@@ -183,17 +159,12 @@ export class PerformanceEventStore {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', $1, false),
-              set_config('app.current_agent_id', $2, false),
-              set_config('app.current_principal_level', 'EXECUTIVE', false)`,
-            [this.tenantId, review.agentId]
-          );
-        } catch {
-          // ignore in pg-mem
-        }
+        await applyAuthenticatedSession(client, {
+          tenantId: this.tenantId,
+          agentId: review.agentId,
+          departmentId: review.departmentId,
+          principalLevel: 'EXECUTIVE',
+        });
 
         await client.query(
           `INSERT INTO agent_performance_reviews (
@@ -223,16 +194,7 @@ export class PerformanceEventStore {
           ]
         );
       } finally {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', '', false),
-              set_config('app.current_agent_id', '', false),
-              set_config('app.current_principal_level', '', false)`
-          );
-        } catch {
-          // ignore
-        }
+        await clearAuthenticatedSession(client);
         client.release();
       }
     }

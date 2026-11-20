@@ -329,6 +329,9 @@ importers:
 
   packages/performance-management:
     dependencies:
+      '@vme/agent-memory':
+        specifier: workspace:*
+        version: link:../agent-memory
       '@vme/department-hierarchy':
         specifier: workspace:*
         version: link:../department-hierarchy

@@ -17,6 +17,7 @@
     "clean": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\""
   },
   "dependencies": {
+    "@vme/agent-memory": "workspace:*",
     "@vme/department-hierarchy": "workspace:*",
     "@vme/shared-types": "workspace:*",
     "pg": "^8.23.1",

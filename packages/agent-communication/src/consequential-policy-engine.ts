@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Pool } from 'pg';
+import { applyAuthenticatedSession, clearAuthenticatedSession } from '@vme/agent-memory';
 import {
   OWNER_PRINCIPAL_ID,
   CANONICAL_OWNER_PRINCIPAL,
@@ -458,17 +459,12 @@ export class ConsequentialPolicyEngine {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', $1, false),
-              set_config('app.current_agent_id', $2, false),
-              set_config('app.current_principal_level', 'SPECIALIST', false)`,
-            [this.tenantId, record.agentId]
-          );
-        } catch {
-          // ignore in pg-mem or test environments where set_config is not registered
-        }
+        await applyAuthenticatedSession(client, {
+          tenantId: this.tenantId,
+          agentId: record.agentId,
+          departmentId: record.departmentId,
+          principalLevel: 'SPECIALIST',
+        });
 
         await client.query(
           `INSERT INTO consequential_authorization_requests (
@@ -491,16 +487,7 @@ export class ConsequentialPolicyEngine {
           ]
         );
       } finally {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', '', false),
-              set_config('app.current_agent_id', '', false),
-              set_config('app.current_principal_level', '', false)`
-          );
-        } catch {
-          // ignore
-        }
+        await clearAuthenticatedSession(client);
         client.release();
       }
     } else {
@@ -681,17 +668,12 @@ export class ConsequentialPolicyEngine {
 
       const client = await this.pool.connect();
       try {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', $1, false),
-              set_config('app.is_owner_authenticated', 'true', false),
-              set_config('app.current_principal_level', 'OWNER', false)`,
-            [this.tenantId]
-          );
-        } catch {
-          // ignore in pg-mem
-        }
+        await applyAuthenticatedSession(client, {
+          tenantId: this.tenantId,
+          agentId: OWNER_PRINCIPAL_ID,
+          principalLevel: 'OWNER',
+          isOwnerAuthenticated: true,
+        });
 
         const res = await client.query(
           `UPDATE consequential_authorization_requests
@@ -706,16 +688,7 @@ export class ConsequentialPolicyEngine {
           );
         }
       } finally {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', '', false),
-              set_config('app.is_owner_authenticated', 'false', false),
-              set_config('app.current_principal_level', '', false)`
-          );
-        } catch {
-          // ignore
-        }
+        await clearAuthenticatedSession(client);
         client.release();
       }
 
@@ -752,17 +725,12 @@ export class ConsequentialPolicyEngine {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', $1, false),
-              set_config('app.is_owner_authenticated', 'true', false),
-              set_config('app.current_principal_level', 'OWNER', false)`,
-            [this.tenantId]
-          );
-        } catch {
-          // ignore in pg-mem
-        }
+        await applyAuthenticatedSession(client, {
+          tenantId: this.tenantId,
+          agentId: OWNER_PRINCIPAL_ID,
+          principalLevel: 'OWNER',
+          isOwnerAuthenticated: true,
+        });
 
         const res = await client.query(
           `SELECT id, tenant_id as "tenantId", task_id as "taskId", action_type as "actionType",
@@ -787,16 +755,7 @@ export class ConsequentialPolicyEngine {
           executionResult: typeof row.executionResult === 'string' ? JSON.parse(row.executionResult) : (row.executionResult ?? undefined),
         };
       } finally {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', '', false),
-              set_config('app.is_owner_authenticated', 'false', false),
-              set_config('app.current_principal_level', '', false)`
-          );
-        } catch {
-          // ignore
-        }
+        await clearAuthenticatedSession(client);
         client.release();
       }
     } else {
@@ -816,17 +775,12 @@ export class ConsequentialPolicyEngine {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', $1, false),
-              set_config('app.is_owner_authenticated', 'true', false),
-              set_config('app.current_principal_level', 'OWNER', false)`,
-            [this.tenantId]
-          );
-        } catch {
-          // ignore in pg-mem
-        }
+        await applyAuthenticatedSession(client, {
+          tenantId: this.tenantId,
+          agentId: OWNER_PRINCIPAL_ID,
+          principalLevel: 'OWNER',
+          isOwnerAuthenticated: true,
+        });
 
         const res = await client.query(
           `SELECT id, tenant_id as "tenantId", task_id as "taskId", action_type as "actionType",
@@ -849,16 +803,7 @@ export class ConsequentialPolicyEngine {
           payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : (row.payload ?? {}),
         }));
       } finally {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', '', false),
-              set_config('app.is_owner_authenticated', 'false', false),
-              set_config('app.current_principal_level', '', false)`
-          );
-        } catch {
-          // ignore
-        }
+        await clearAuthenticatedSession(client);
         client.release();
       }
     } else {
@@ -872,17 +817,12 @@ export class ConsequentialPolicyEngine {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', $1, false),
-              set_config('app.is_owner_authenticated', 'true', false),
-              set_config('app.current_principal_level', 'OWNER', false)`,
-            [this.tenantId]
-          );
-        } catch {
-          // ignore in pg-mem
-        }
+        await applyAuthenticatedSession(client, {
+          tenantId: this.tenantId,
+          agentId: OWNER_PRINCIPAL_ID,
+          principalLevel: 'OWNER',
+          isOwnerAuthenticated: true,
+        });
 
         await client.query(
           `UPDATE consequential_authorization_requests
@@ -902,16 +842,7 @@ export class ConsequentialPolicyEngine {
           ]
         );
       } finally {
-        try {
-          await client.query(
-            `SELECT 
-              set_config('app.current_tenant_id', '', false),
-              set_config('app.is_owner_authenticated', 'false', false),
-              set_config('app.current_principal_level', '', false)`
-          );
-        } catch {
-          // ignore
-        }
+        await clearAuthenticatedSession(client);
         client.release();
       }
     } else {

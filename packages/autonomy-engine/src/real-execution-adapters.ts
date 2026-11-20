@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
+import { applyAuthenticatedSession, clearAuthenticatedSession } from '@vme/agent-memory';
 
 const execFileAsync = promisify(execFile);
 
@@ -453,11 +454,11 @@ export class TaskExecutionRecorder {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
-        try {
-          await client.query(`SELECT set_config('app.current_tenant_id', $1, true)`, [this.tenantId]);
-        } catch {
-          // ignore in pg-mem
-        }
+        await applyAuthenticatedSession(client, {
+          tenantId: this.tenantId,
+          agentId: record.assignedAgentId,
+          principalLevel: 'SPECIALIST',
+        });
 
         await client.query(
           `INSERT INTO task_execution_records (
@@ -476,11 +477,7 @@ export class TaskExecutionRecorder {
           ]
         );
       } finally {
-        try {
-          await client.query(`SELECT set_config('app.current_tenant_id', '', false)`);
-        } catch {
-          // ignore
-        }
+        await clearAuthenticatedSession(client);
         client.release();
       }
     }
@@ -513,11 +510,11 @@ export class TaskExecutionRecorder {
     if (this.pool) {
       const client = await this.pool.connect();
       try {
-        try {
-          await client.query(`SELECT set_config('app.current_tenant_id', $1, true)`, [this.tenantId]);
-        } catch {
-          // ignore in pg-mem
-        }
+        await applyAuthenticatedSession(client, {
+          tenantId: this.tenantId,
+          agentId: record.assignedAgentId,
+          principalLevel: 'SPECIALIST',
+        });
 
         await client.query(
           `UPDATE task_execution_records
@@ -538,11 +535,7 @@ export class TaskExecutionRecorder {
           ]
         );
       } finally {
-        try {
-          await client.query(`SELECT set_config('app.current_tenant_id', '', false)`);
-        } catch {
-          // ignore
-        }
+        await clearAuthenticatedSession(client);
         client.release();
       }
     }
