@@ -422,16 +422,26 @@ export interface TaskExecutionRecord {
  * Records start / end timestamps, duration, exit codes / status codes, outputs, and artifacts.
  * Persists into PostgreSQL when pool is provided.
  */
+export interface TaskExecutionRecorderOptions {
+  isTestMode?: boolean;
+}
+
 export class TaskExecutionRecorder {
   private records = new Map<string, TaskExecutionRecord>();
-  public readonly departmentRegistry: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider;
+  public readonly departmentRegistry?: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider;
 
   constructor(
     private readonly pool?: Pool,
     private readonly tenantId: string = '00000000-0000-0000-0000-000000000001',
-    departmentRegistry?: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider
+    departmentRegistry?: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider,
+    options?: TaskExecutionRecorderOptions
   ) {
-    this.departmentRegistry = departmentRegistry ?? new DepartmentRegistry();
+    if (this.pool && !departmentRegistry && !options?.isTestMode) {
+      throw new Error(
+        'Production task execution recorder initialization failed: Authoritative workforce registry or identity provider must be explicitly supplied when database pool is configured. Implicit registry construction is strictly prohibited.'
+      );
+    }
+    this.departmentRegistry = departmentRegistry;
   }
 
   async startExecution(params: {

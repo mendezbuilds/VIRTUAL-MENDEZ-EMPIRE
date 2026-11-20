@@ -75,7 +75,7 @@ describe('M2.6 Evidence-Based Performance Management & Persistence', () => {
     const { Pool: PgPool } = db.adapters.createPg();
     pool = new PgPool() as unknown as Pool;
 
-    eventStore = new PerformanceEventStore(pool, tenantId);
+    eventStore = new PerformanceEventStore(pool, tenantId, hierarchy);
     kpiCalculator = new KPICalculator();
     reviewEngine = new PerformanceReviewEngine(hierarchy, kpiCalculator, eventStore);
   });

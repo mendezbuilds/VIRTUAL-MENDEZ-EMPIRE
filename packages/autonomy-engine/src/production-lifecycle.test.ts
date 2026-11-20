@@ -351,6 +351,7 @@ describe('VME Phase 2 — Production Integration & Complete Corporate Lifecycle'
       pool,
       tenantId,
       authService,
+      departmentRegistry: hierarchy,
     });
 
     const delegation = new DelegationManager(hierarchy, router, { policyEngine });
@@ -359,9 +360,10 @@ describe('VME Phase 2 — Production Integration & Complete Corporate Lifecycle'
       pool,
       defaultTenantId: tenantId,
       emergencySupervisor: supervisor,
+      departmentRegistry: hierarchy,
     });
 
-    const eventStore = new PerformanceEventStore(pool, tenantId);
+    const eventStore = new PerformanceEventStore(pool, tenantId, hierarchy);
     const kpiCalc = new KPICalculator();
     const budgetTracker = new BudgetTracker(hierarchy);
     const reviewEngine = new PerformanceReviewEngine(hierarchy, kpiCalc, eventStore);
@@ -643,10 +645,12 @@ describe('VME Phase 2 — Production Integration & Complete Corporate Lifecycle'
   });
 
   it('rejects unauthorized cross-agent working memory access in production PostgreSQL mode', async () => {
+    const hierarchy = new DepartmentRegistry();
     const memoryEngine = new AgentMemoryEngine({
       mode: 'PRODUCTION_POSTGRES',
       pool,
       defaultTenantId: tenantId,
+      departmentRegistry: hierarchy,
     });
 
     const taskId = 'task-security-001';

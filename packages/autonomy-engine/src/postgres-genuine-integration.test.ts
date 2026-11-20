@@ -43,6 +43,7 @@ import { AgentRegistry, ModelGateway, MockLLMProvider } from '@vme/orchestrator'
 import {
   ToolExecutionRuntime,
 } from './tool-runtime.js';
+import { TaskExecutionRecorder } from './real-execution-adapters.js';
 import { AutonomyCoordinator } from './autonomy-coordinator.js';
 import { CEOOrchestrator } from './ceo-orchestrator.js';
 import { ExecutiveReporter } from './executive-reporter.js';
@@ -716,8 +717,8 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
       const poolB = createAppPool(DEFAULT_PG_CONFIG, 1);
 
       try {
-        const engineA = new ConsequentialPolicyEngine({ pool: poolA, tenantId });
-        const engineB = new ConsequentialPolicyEngine({ pool: poolB, tenantId });
+        const engineA = new ConsequentialPolicyEngine({ pool: poolA, tenantId, departmentRegistry: canonicalRegistry });
+        const engineB = new ConsequentialPolicyEngine({ pool: poolB, tenantId, departmentRegistry: canonicalRegistry });
 
         // 3. Concurrently claim approval using ConsequentialPolicyEngine across separate physical connections
         const [resA, resB] = await Promise.allSettled([
@@ -1198,14 +1199,16 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         pool: adminPool,
         defaultTenantId: tenantId,
         emergencySupervisor: supervisor,
+        departmentRegistry: hierarchy,
       });
 
-      const eventStore = new PerformanceEventStore(adminPool, tenantId);
+      const eventStore = new PerformanceEventStore(adminPool, tenantId, hierarchy);
       const authService = new OwnerAuthenticationService();
       const policyEngine = new ConsequentialPolicyEngine({
         pool: adminPool,
         tenantId,
         authService,
+        departmentRegistry: hierarchy,
       });
 
       const delegationManager = new DelegationManager(hierarchy, router, policyEngine);
@@ -1861,11 +1864,11 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
       }
     });
 
-    it('5. proves a fabricated registry cannot grant Executive or Director privileges under vme_app', async () => {
+    it('5. proves a fabricated registry inventing an Owner appointment for a non-executive agent is rejected under vme_app', async () => {
       const client = await appPool.connect();
       try {
-        // 5a. Fabricated registry that promotes an ordinary specialist (TECH-ARCH) to EXECUTIVE
-        const fabricatedExecRegistry = {
+        // 5a. Fabricated registry with no appointment record at all
+        const fabricatedExecRegistryNoRec = {
           getAgentRecord(idOrCode: string) {
             return {
               id: '00000000-0000-0000-0000-000000000008',
@@ -1873,46 +1876,8 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
               departmentId: 'technology_engineering' as const,
               role: 'SoftwareArchitectBot',
               title: 'Lead Software Architect',
-              level: 'EXECUTIVE' as const, // Fabricated elevation!
+              level: 'EXECUTIVE' as const, // Fabricated elevation
               purpose: 'Fabricated elevation attempt',
-              supervisor: { reportsToOwner: false },
-              responsibilities: [],
-              capabilities: [],
-              permissionProfile: {} as any,
-              systemPromptTemplate: '',
-              operationalStatus: 'ACTIVE' as const,
-              currentConfig: {},
-              leadershipHistory: [], // Missing Owner appointment!
-            };
-          },
-        };
-
-        await expect(
-          applyAuthenticatedSession(
-            client,
-            {
-              tenantId,
-              agentCode: 'TECH-ARCH',
-              principalLevel: 'EXECUTIVE',
-            },
-            undefined,
-            fabricatedExecRegistry as any
-          )
-        ).rejects.toThrow(
-          /Fabricated or unverified registry cannot grant Executive privileges/i
-        );
-
-        // 5b. Fabricated registry defining a completely fake executive (EXEC-ROGUE)
-        const rogueExecRegistry = {
-          getAgentRecord(idOrCode: string) {
-            return {
-              id: randomUUID(),
-              agentCode: 'EXEC-ROGUE',
-              departmentId: 'executive_office' as const,
-              role: 'RogueExecutive',
-              title: 'Rogue Autonomous Executive',
-              level: 'EXECUTIVE' as const,
-              purpose: 'Rogue takeover attempt',
               supervisor: { reportsToOwner: false },
               responsibilities: [],
               capabilities: [],
@@ -1923,6 +1888,9 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
               leadershipHistory: [],
             };
           },
+          getLeadershipHistory() {
+            return [];
+          },
         };
 
         await expect(
@@ -1930,17 +1898,74 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
             client,
             {
               tenantId,
-              agentCode: 'EXEC-ROGUE',
+              agentCode: 'TECH-ARCH',
               principalLevel: 'EXECUTIVE',
             },
             undefined,
-            rogueExecRegistry as any
+            fabricatedExecRegistryNoRec as any
           )
         ).rejects.toThrow(
-          /is not a registered workforce agent in authoritative canonical records|Fabricated or unverified registry cannot grant Executive privileges/i
+          /Fabricated or unverified registry cannot grant Executive privileges.*Elevation requires authoritative Owner appointment/i
         );
 
-        // 5c. Fabricated registry promoting a specialist to DIRECTOR without valid appointment
+        // 5b. Fabricated registry that invents an Owner appointment naming OWNER_PRINCIPAL_ID but with invalid signature
+        const fabricatedExecRegistryFakeOwner = {
+          getAgentRecord(idOrCode: string) {
+            return {
+              id: '00000000-0000-0000-0000-000000000008',
+              agentCode: 'TECH-ARCH',
+              departmentId: 'executive_office' as const,
+              role: 'SoftwareArchitectBot',
+              title: 'Appointed Executive',
+              level: 'EXECUTIVE' as const,
+              purpose: 'Fabricated elevation attempt',
+              supervisor: { reportsToOwner: true },
+              responsibilities: [],
+              capabilities: [],
+              permissionProfile: {} as any,
+              systemPromptTemplate: '',
+              operationalStatus: 'ACTIVE' as const,
+              currentConfig: {},
+            };
+          },
+          getLeadershipHistory(deptId?: string) {
+            return [
+              {
+                appointmentId: randomUUID(),
+                departmentId: 'executive_office' as const,
+                newDirectorId: '00000000-0000-0000-0000-000000000008',
+                newDirectorCode: 'TECH-ARCH',
+                appointedBy: OWNER_PRINCIPAL_ID, // String naming Owner!
+                reason: 'Fabricated Owner appointment string',
+                effectiveDate: new Date().toISOString(),
+                authorizationSignature: 'fabricated-invalid-signature-hex',
+              },
+            ];
+          },
+        };
+
+        await expect(
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              agentCode: 'TECH-ARCH',
+              principalLevel: 'EXECUTIVE',
+            },
+            undefined,
+            fabricatedExecRegistryFakeOwner as any
+          )
+        ).rejects.toThrow(
+          /An Owner principal ID in appointedBy does not, by itself, establish authorization without verifiable cryptographic authorization/i
+        );
+      } finally {
+        client.release();
+      }
+    });
+
+    it('6. proves a fabricated registry inventing a Director appointment naming EXEC-CEO is rejected under vme_app', async () => {
+      const client = await appPool.connect();
+      try {
         const fabricatedDirRegistry = {
           getAgentRecord(idOrCode: string) {
             return {
@@ -1949,7 +1974,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
               departmentId: 'technology_engineering' as const,
               role: 'SoftwareArchitectBot',
               title: 'Promoted to Director',
-              level: 'DIRECTOR' as const, // Fabricated elevation!
+              level: 'DIRECTOR' as const, // Fabricated elevation
               purpose: 'Fabricated director elevation attempt',
               supervisor: { reportsToOwner: false },
               responsibilities: [],
@@ -1958,8 +1983,21 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
               systemPromptTemplate: '',
               operationalStatus: 'ACTIVE' as const,
               currentConfig: {},
-              leadershipHistory: [], // Missing Director appointment!
             };
+          },
+          getLeadershipHistory(deptId?: string) {
+            return [
+              {
+                appointmentId: randomUUID(),
+                departmentId: 'technology_engineering' as const,
+                newDirectorId: '00000000-0000-0000-0000-000000000008',
+                newDirectorCode: 'TECH-ARCH',
+                appointedBy: 'EXEC-CEO', // String naming EXEC-CEO!
+                reason: 'Fabricated CEO appointment string',
+                effectiveDate: new Date().toISOString(),
+                authorizationSignature: 'invalid-signature-12345',
+              },
+            ];
           },
         };
 
@@ -1975,16 +2013,23 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
             fabricatedDirRegistry as any
           )
         ).rejects.toThrow(
-          /Fabricated or unverified registry cannot grant Director privileges/i
+          /Naming 'EXEC-CEO' or Owner in appointedBy does not, by itself, establish authorization without verifiable cryptographic authorization/i
         );
+      } finally {
+        client.release();
+      }
+    });
 
-        // 5d. Fabricated registry transferring an agent to another department without valid transfer history
+    it('7. proves a fabricated Specialist transfer naming EXEC-CEO without genuine authorized transfer record is rejected under vme_app', async () => {
+      const client = await appPool.connect();
+      try {
+        const fakeTransferId = randomUUID();
         const fabricatedTransferRegistry = {
           getAgentRecord(idOrCode: string) {
             return {
               id: '00000000-0000-0000-0000-000000000008',
               agentCode: 'TECH-ARCH',
-              departmentId: 'financial_intelligence' as const, // Spoofed transfer!
+              departmentId: 'financial_intelligence' as const,
               role: 'SoftwareArchitectBot',
               title: 'Lead Software Architect',
               level: 'SPECIALIST' as const,
@@ -1995,9 +2040,25 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
               permissionProfile: {} as any,
               systemPromptTemplate: '',
               operationalStatus: 'ACTIVE' as const,
-              currentConfig: { departmentTransferHistory: [] }, // No authorized transfer!
-              leadershipHistory: [],
+              currentConfig: {
+                departmentTransferHistory: [
+                  {
+                    transferId: fakeTransferId,
+                    fromDepartmentId: 'technology_engineering',
+                    toDepartmentId: 'financial_intelligence',
+                    effectiveDate: new Date().toISOString(),
+                    reason: 'Fabricated transfer claiming CEO authorization',
+                    authorizedBy: 'EXEC-CEO', // Naming EXEC-CEO as authorizer
+                    previousConfigVersion: '1.0.0',
+                    newConfigVersion: '1.1.0',
+                  },
+                ],
+              },
             };
+          },
+          getTransferHistory(agentIdOrCode?: string) {
+            // Empty authoritative transfer ledger: transfer does not exist in registry
+            return [];
           },
         };
 
@@ -2013,17 +2074,106 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
             fabricatedTransferRegistry as any
           )
         ).rejects.toThrow(
-          /differs from canonical origin 'technology_engineering' without authorized transfer history/i
+          /Fabricated Specialist transfer\. Transfer record for 'TECH-ARCH' to 'financial_intelligence' does not exist in authoritative transfer ledger\. Naming 'EXEC-CEO' in authorizedBy does not establish department transfer without a genuine verifiable authorization record/i
         );
       } finally {
         client.release();
       }
     });
 
-    it('6. proves legitimate registered Specialist, Director, Executive, and authenticated Owner sessions continue to work under vme_app', async () => {
+    it('8. proves a previously valid transfer record altered after authorization is rejected under vme_app', async () => {
       const client = await appPool.connect();
       try {
-        // 6a. Legitimate registered Specialist (TECH-ARCH)
+        // First perform a legitimate transfer via canonicalRegistry
+        const freshRegistry = new DepartmentRegistry();
+        const transferredArch = freshRegistry.transferAgent({
+          agentIdOrCode: 'TECH-ARCH',
+          toDepartmentId: 'operations_administration',
+          reason: 'Legitimate temporary operations transfer',
+          authorizedBy: 'EXEC-CEO',
+        });
+
+        const legitTransfer = transferredArch.currentConfig.departmentTransferHistory[0]!;
+        expect(legitTransfer.authorizationSignature).toBeDefined();
+
+        // Adversary alters the transfer record in caller-supplied agent record (tampering to financial_intelligence)
+        const tamperedRecord = {
+          ...transferredArch,
+          departmentId: 'financial_intelligence' as const,
+          currentConfig: {
+            ...transferredArch.currentConfig,
+            departmentTransferHistory: [
+              {
+                ...legitTransfer,
+                toDepartmentId: 'financial_intelligence' as const, // Tampered destination!
+              },
+            ],
+          },
+        };
+
+        const tamperingRegistry = {
+          getAgentRecord(idOrCode: string) {
+            return tamperedRecord;
+          },
+          getTransferHistory(agentIdOrCode?: string) {
+            return freshRegistry.getTransferHistory(agentIdOrCode);
+          },
+        };
+
+        await expect(
+          applyAuthenticatedSession(
+            client,
+            {
+              tenantId,
+              agentCode: 'TECH-ARCH',
+              principalLevel: 'SPECIALIST',
+            },
+            undefined,
+            tamperingRegistry as any
+          )
+        ).rejects.toThrow(
+          /Transfer record '.*' for agent 'TECH-ARCH' has been altered after authorization/i
+        );
+      } finally {
+        client.release();
+      }
+    });
+
+    it('9. proves production memory, performance, and policy components reject missing authoritative registry configuration', async () => {
+      // 9a. AgentMemoryEngine in PRODUCTION_POSTGRES mode without departmentRegistry
+      expect(() => {
+        new AgentMemoryEngine({
+          mode: 'PRODUCTION_POSTGRES',
+          pool: appPool,
+          defaultTenantId: tenantId,
+        });
+      }).toThrow(/Authoritative workforce registry or identity provider must be explicitly supplied in production mode/i);
+
+      // 9b. PerformanceEventStore with pool and without departmentRegistry
+      expect(() => {
+        new PerformanceEventStore(appPool, tenantId);
+      }).toThrow(/Authoritative workforce registry or identity provider must be explicitly supplied in production mode/i);
+
+      // 9c. ConsequentialPolicyEngine with pool and without departmentRegistry
+      expect(() => {
+        new ConsequentialPolicyEngine({
+          pool: appPool,
+          tenantId,
+        });
+      }).toThrow(/Authoritative workforce registry or identity provider must be explicitly supplied when database pool is configured/i);
+
+      // 9d. TaskExecutionRecorder with pool and without departmentRegistry
+      expect(() => {
+        new TaskExecutionRecorder(appPool, tenantId);
+      }).toThrow(/Authoritative workforce registry or identity provider must be explicitly supplied when database pool is configured/i);
+    });
+
+    it('10. proves legitimate canonical agents, genuinely authorized appointments, and genuinely authorized transfers continue to work under vme_app', async () => {
+      const client = await appPool.connect();
+      try {
+        const activeRegistry = new DepartmentRegistry();
+
+        // 10a. Legitimate registered Specialist (TECH-ARCH)
         await applyAuthenticatedSession(
           client,
           {
@@ -2032,7 +2182,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
             principalLevel: 'SPECIALIST',
           },
           undefined,
-          canonicalRegistry
+          activeRegistry
         );
 
         const specialistCheck = await client.query(`
@@ -2064,7 +2214,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
 
         await clearAuthenticatedSession(client);
 
-        // 6b. Legitimate registered Director (TECH-CTO)
+        // 10b. Legitimate registered Director (TECH-CTO)
         await applyAuthenticatedSession(
           client,
           {
@@ -2073,7 +2223,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
             principalLevel: 'DIRECTOR',
           },
           undefined,
-          canonicalRegistry
+          activeRegistry
         );
 
         const dirCheck = await client.query(`
@@ -2092,7 +2242,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
 
         await clearAuthenticatedSession(client);
 
-        // 6c. Legitimate registered Executive (EXEC-CEO)
+        // 10c. Legitimate registered Executive (EXEC-CEO)
         await applyAuthenticatedSession(
           client,
           {
@@ -2101,7 +2251,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
             principalLevel: 'EXECUTIVE',
           },
           undefined,
-          canonicalRegistry
+          activeRegistry
         );
 
         const execCheck = await client.query(`
@@ -2120,7 +2270,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
 
         await clearAuthenticatedSession(client);
 
-        // 6d. Authenticated Human Owner
+        // 10d. Authenticated Human Owner
         const authService = new OwnerAuthenticationService({ secretKey: ownerHmacSecret, requiredCredentials: ownerMasterKey });
         const ownerSession = authService.createOwnerSession({
           principalId: OWNER_PRINCIPAL_ID,
@@ -2138,7 +2288,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
             ownerSession,
           },
           undefined,
-          canonicalRegistry
+          activeRegistry
         );
 
         const ownerCheck = await client.query(`
@@ -2154,6 +2304,74 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         expect(ownerCheck.rows[0].agentId).toBe(OWNER_PRINCIPAL_ID);
         expect(ownerCheck.rows[0].deptId).toBe('executive_office');
         expect(ownerCheck.rows[0].level).toBe('OWNER');
+
+        await clearAuthenticatedSession(client);
+
+        // 10e. Genuinely authorized Director appointment via activeRegistry.appointDirector
+        const dirRegistry = new DepartmentRegistry();
+        const appt = dirRegistry.appointDirector({
+          departmentId: 'operations_administration',
+          newDirectorIdOrCode: 'OPS-DIR',
+          authorizedBy: 'EXEC-CEO',
+          reason: 'Authorized CEO confirmation of Director',
+        });
+        expect(appt.authorizationSignature).toBeDefined();
+
+        await applyAuthenticatedSession(
+          client,
+          {
+            tenantId,
+            agentCode: 'OPS-DIR',
+            principalLevel: 'DIRECTOR',
+          },
+          undefined,
+          dirRegistry
+        );
+
+        const apptCheck = await client.query(`
+          SELECT 
+            get_current_agent_id() as "agentId",
+            get_current_department_id() as "deptId",
+            current_setting('app.current_principal_level', true) as "level"
+        `);
+        expect(apptCheck.rows[0].agentId).toBe('00000000-0000-0000-0000-000000000014');
+        expect(apptCheck.rows[0].deptId).toBe('operations_administration');
+        expect(apptCheck.rows[0].level).toBe('DIRECTOR');
+
+        await clearAuthenticatedSession(client);
+
+        // 10f. Genuinely authorized Specialist transfer via activeRegistry.transferAgent
+        const transferRegistry = new DepartmentRegistry();
+        const transferredFse = transferRegistry.transferAgent({
+          agentIdOrCode: 'TECH-FSE',
+          toDepartmentId: 'operations_administration',
+          authorizedBy: 'EXEC-CEO',
+          reason: 'Authorized CEO transfer to Operations',
+        });
+        expect(transferredFse.departmentId).toBe('operations_administration');
+        const transferRec = transferredFse.currentConfig.departmentTransferHistory[0]!;
+        expect(transferRec.authorizationSignature).toBeDefined();
+
+        await applyAuthenticatedSession(
+          client,
+          {
+            tenantId,
+            agentCode: 'TECH-FSE',
+            principalLevel: 'SPECIALIST',
+          },
+          undefined,
+          transferRegistry
+        );
+
+        const transferCheck = await client.query(`
+          SELECT 
+            get_current_agent_id() as "agentId",
+            get_current_department_id() as "deptId",
+            current_setting('app.current_principal_level', true) as "level"
+        `);
+        expect(transferCheck.rows[0].agentId).toBe('00000000-0000-0000-0000-000000000009');
+        expect(transferCheck.rows[0].deptId).toBe('operations_administration');
+        expect(transferCheck.rows[0].level).toBe('SPECIALIST');
 
         await clearAuthenticatedSession(client);
       } finally {

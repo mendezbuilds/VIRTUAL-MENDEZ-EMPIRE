@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHmac } from 'node:crypto';
 import {
   OWNER_PRINCIPAL_ID,
   CANONICAL_OWNER_PRINCIPAL,
@@ -19,6 +19,43 @@ export interface LeadershipAppointmentRecord {
   appointedBy: string;
   reason: string;
   effectiveDate: string;
+  authorizationSignature?: string;
+}
+
+export function computeAppointmentAuthorizationSignature(
+  record: {
+    appointmentId: string;
+    departmentId: DepartmentId;
+    newDirectorId: string;
+    newDirectorCode: string;
+    appointedBy: string;
+    effectiveDate: string;
+    reason?: string;
+  },
+  secret: string = process.env.DB_SESSION_SECRET || 'vme-canonical-hierarchy-authority-secret-2026'
+): string {
+  const canonical = [
+    'APPOINTMENT_AUTH_V1',
+    record.appointmentId,
+    record.departmentId,
+    record.newDirectorId,
+    record.newDirectorCode,
+    record.appointedBy,
+    record.effectiveDate,
+    record.reason ?? '',
+  ].join(':');
+  return createHmac('sha256', secret).update(canonical).digest('hex');
+}
+
+export function verifyAppointmentAuthorizationSignature(
+  record: LeadershipAppointmentRecord,
+  secret: string = process.env.DB_SESSION_SECRET || 'vme-canonical-hierarchy-authority-secret-2026'
+): boolean {
+  if (!record.authorizationSignature || typeof record.authorizationSignature !== 'string') {
+    return false;
+  }
+  const expectedSig = computeAppointmentAuthorizationSignature(record, secret);
+  return record.authorizationSignature === expectedSig;
 }
 
 export class DepartmentLeadershipManager {
@@ -157,9 +194,25 @@ export class DepartmentLeadershipManager {
     dept.directorCode = newDirector.agentCode;
     dept.updatedAt = params.effectiveDate ?? new Date().toISOString();
 
-    // 5. Construct deep-frozen leadership appointment record
+    // 5. Construct cryptographically verifiable deep-frozen leadership appointment record
+    const appointmentId = randomUUID();
+    const effectiveDate = params.effectiveDate ?? new Date().toISOString();
+    const secret = process.env.DB_SESSION_SECRET || 'vme-canonical-hierarchy-authority-secret-2026';
+    const signature = computeAppointmentAuthorizationSignature(
+      {
+        appointmentId,
+        departmentId: params.departmentId,
+        newDirectorId: newDirector.id,
+        newDirectorCode: newDirector.agentCode,
+        appointedBy: params.authorizedBy,
+        effectiveDate,
+        reason: params.reason,
+      },
+      secret
+    );
+
     const record: LeadershipAppointmentRecord = Object.freeze({
-      appointmentId: randomUUID(),
+      appointmentId,
       departmentId: params.departmentId,
       previousDirectorId,
       previousDirectorCode,
@@ -167,7 +220,8 @@ export class DepartmentLeadershipManager {
       newDirectorCode: newDirector.agentCode,
       appointedBy: params.authorizedBy,
       reason: params.reason,
-      effectiveDate: params.effectiveDate ?? new Date().toISOString(),
+      effectiveDate,
+      authorizationSignature: signature,
     });
 
     this.appointmentHistory.push(record);

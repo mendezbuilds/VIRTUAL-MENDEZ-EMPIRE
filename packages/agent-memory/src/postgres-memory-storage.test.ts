@@ -383,11 +383,22 @@ describe('Postgres Memory Storage & Adversarial RLS / Isolation Tests', () => {
       }).toThrow(PostgresStorageError);
     });
 
-    it('AgentMemoryEngine initializes successfully when postgres pool and tenantId are supplied', () => {
+    it('AgentMemoryEngine fails closed when departmentRegistry is omitted in PRODUCTION_POSTGRES mode', () => {
+      expect(() => {
+        new AgentMemoryEngine({
+          mode: 'PRODUCTION_POSTGRES',
+          pool: pool,
+          defaultTenantId: tenant1,
+        });
+      }).toThrow(/Authoritative workforce registry or identity provider must be explicitly supplied in production mode/i);
+    });
+
+    it('AgentMemoryEngine initializes successfully when postgres pool, tenantId, and departmentRegistry are supplied', () => {
       const engine = new AgentMemoryEngine({
         mode: 'PRODUCTION_POSTGRES',
         pool: pool,
         defaultTenantId: tenant1,
+        departmentRegistry: registry,
       });
 
       expect(engine.mode).toBe('PRODUCTION_POSTGRES');

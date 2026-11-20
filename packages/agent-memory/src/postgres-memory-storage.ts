@@ -11,13 +11,20 @@ import {
   type ProceduralPlaybook,
   type EmbeddingMetadata,
   type DepartmentId,
+  type DepartmentTransferRecord,
   type MemoryScope,
   EpisodicMemoryRecordSchema,
   SemanticKnowledgeItemSchema,
   ProceduralPlaybookSchema,
 } from '@vme/shared-types';
 import { verifyOwnerSessionToken } from '@vme/security-governance';
-import { DepartmentRegistry, type LeadershipAppointmentRecord } from '@vme/department-hierarchy';
+import {
+  DepartmentRegistry,
+  type LeadershipAppointmentRecord,
+  type AuthoritativeTransferRecord,
+  verifyAppointmentAuthorizationSignature,
+  verifyTransferAuthorizationSignature,
+} from '@vme/department-hierarchy';
 import type { EpisodicMemoryFilter, EpisodicMemoryStorage } from './episodic-memory.js';
 import type { SemanticSearchFilter, SemanticSearchResult, SemanticStorage } from './semantic-memory.js';
 import type { ProceduralQueryFilter, ProceduralStorage } from './procedural-memory.js';
@@ -31,6 +38,7 @@ import type { WorkingMemoryStorage } from './working-memory.js';
 export interface AuthoritativeWorkforceIdentityProvider {
   getAgentRecord(idOrCode: string): AgentRecord | null;
   getLeadershipHistory?(departmentId?: DepartmentId): LeadershipAppointmentRecord[];
+  getTransferHistory?(agentIdOrCode?: string): (DepartmentTransferRecord & { agentId?: string; agentCode?: string })[];
   auditIntegrity?(): { valid: boolean; errors: string[] };
 }
 
@@ -112,12 +120,15 @@ export function signDatabaseClaims(
 /**
  * Validates that an injected workforce registry or identity provider is authoritative,
  * reflecting canonical organizational records, valid Director appointments, and authorized transfers.
- * Strictly prevents fabricated registries from establishing privileged (Executive/Director) identity.
+ * Strictly prevents fabricated registries from establishing privileged (Executive/Director) identity
+ * and validates that appointment and transfer records possess verifiable cryptographic signatures
+ * and unbroken audit ledgers.
  */
 export function verifyRegistryAuthoritativeness(
   registry: AuthoritativeWorkforceIdentityProvider | DepartmentRegistry,
   agentRecord: AgentRecord,
-  requestedLevel?: string
+  requestedLevel?: string,
+  secret: string = getDatabaseSessionSecret()
 ): void {
   // 1. Look up agent in CANONICAL_FOUNDING_AGENTS
   const canonicalAgent = CANONICAL_FOUNDING_AGENTS.find(
@@ -137,20 +148,25 @@ export function verifyRegistryAuthoritativeness(
     );
   }
 
-  // 3. Privileged Executive Claims Verification: strictly requires canonical executive status or Owner appointment
+  // 3. Privileged Executive Claims Verification: strictly requires canonical executive status or genuine Owner appointment
   if (agentRecord.level === 'EXECUTIVE' || requestedLevel === 'EXECUTIVE') {
     if (canonicalAgent.level !== 'EXECUTIVE') {
       const leadershipHistory = typeof registry.getLeadershipHistory === 'function'
         ? registry.getLeadershipHistory('executive_office')
         : [];
-      const hasOwnerAppointment = leadershipHistory.some(
+      const appointment = leadershipHistory.find(
         (rec) =>
           (rec.newDirectorId === agentRecord.id || rec.newDirectorCode === agentRecord.agentCode) &&
           (rec.appointedBy === OWNER_PRINCIPAL_ID || rec.appointedBy === CANONICAL_OWNER_PRINCIPAL.principalId)
       );
-      if (!hasOwnerAppointment) {
+      if (!appointment) {
         throw new PostgresStorageError(
           `Privileged database identity issuance rejected: Fabricated or unverified registry cannot grant Executive privileges to non-canonical agent '${agentRecord.agentCode}'. Elevation requires authoritative Owner appointment.`
+        );
+      }
+      if (!verifyAppointmentAuthorizationSignature(appointment, secret)) {
+        throw new PostgresStorageError(
+          `Privileged database identity issuance rejected: Fabricated or unverified appointment record for '${agentRecord.agentCode}'. An Owner principal ID in appointedBy does not, by itself, establish authorization without verifiable cryptographic authorization.`
         );
       }
     }
@@ -166,7 +182,7 @@ export function verifyRegistryAuthoritativeness(
         ? registry.getLeadershipHistory(agentRecord.departmentId)
         : [];
       const canonicalCeo = CANONICAL_FOUNDING_AGENTS.find((a) => a.agentCode === 'EXEC-CEO');
-      const hasValidAppointment = leadershipHistory.some(
+      const appointment = leadershipHistory.find(
         (rec) =>
           (rec.newDirectorId === agentRecord.id || rec.newDirectorCode === agentRecord.agentCode) &&
           (rec.appointedBy === OWNER_PRINCIPAL_ID ||
@@ -174,9 +190,14 @@ export function verifyRegistryAuthoritativeness(
            rec.appointedBy === 'EXEC-CEO' ||
            rec.appointedBy === canonicalCeo?.id)
       );
-      if (!hasValidAppointment) {
+      if (!appointment) {
         throw new PostgresStorageError(
           `Privileged database identity issuance rejected: Fabricated or unverified registry cannot grant Director privileges to '${agentRecord.agentCode}' for department '${agentRecord.departmentId}'. Elevation requires authoritative Director appointment record.`
+        );
+      }
+      if (!verifyAppointmentAuthorizationSignature(appointment, secret)) {
+        throw new PostgresStorageError(
+          `Privileged database identity issuance rejected: Fabricated or unverified appointment record for '${agentRecord.agentCode}'. Naming 'EXEC-CEO' or Owner in appointedBy does not, by itself, establish authorization without verifiable cryptographic authorization.`
         );
       }
     }
@@ -202,6 +223,42 @@ export function verifyRegistryAuthoritativeness(
     if (!isAuthorizedTransferAuthority(latestTransfer.authorizedBy, CANONICAL_FOUNDING_AGENTS)) {
       throw new PostgresStorageError(
         `Database session claims issuance rejected: Agent '${agentRecord.agentCode}' transfer to '${agentRecord.departmentId}' was authorized by '${latestTransfer.authorizedBy}', which lacks executive or Owner transfer authority.`
+      );
+    }
+
+    if (typeof registry.getTransferHistory !== 'function') {
+      throw new PostgresStorageError(
+        `Database session claims issuance rejected: Registry lacks authoritative transfer history ledger. Caller-supplied transfer history is rejected.`
+      );
+    }
+
+    const authoritativeTransfers = registry.getTransferHistory(agentRecord.id);
+    const authTransfer = authoritativeTransfers.find((t) => t.transferId === latestTransfer.transferId);
+    if (!authTransfer) {
+      throw new PostgresStorageError(
+        `Database session claims issuance rejected: Fabricated Specialist transfer. Transfer record for '${agentRecord.agentCode}' to '${agentRecord.departmentId}' does not exist in authoritative transfer ledger. Naming 'EXEC-CEO' in authorizedBy does not establish department transfer without a genuine verifiable authorization record.`
+      );
+    }
+
+    // Verify record has not been altered after authorization
+    if (
+      authTransfer.fromDepartmentId !== latestTransfer.fromDepartmentId ||
+      authTransfer.toDepartmentId !== latestTransfer.toDepartmentId ||
+      authTransfer.effectiveDate !== latestTransfer.effectiveDate ||
+      authTransfer.reason !== latestTransfer.reason ||
+      authTransfer.authorizedBy !== latestTransfer.authorizedBy ||
+      authTransfer.previousConfigVersion !== latestTransfer.previousConfigVersion ||
+      authTransfer.newConfigVersion !== latestTransfer.newConfigVersion
+    ) {
+      throw new PostgresStorageError(
+        `Database session claims issuance rejected: Transfer record '${latestTransfer.transferId}' for agent '${agentRecord.agentCode}' has been altered after authorization.`
+      );
+    }
+
+    // Verify cryptographic authorization signature
+    if (!verifyTransferAuthorizationSignature(agentRecord.id, agentRecord.agentCode, latestTransfer, secret)) {
+      throw new PostgresStorageError(
+        `Database session claims issuance rejected: Transfer record '${latestTransfer.transferId}' authorization signature verification failed. The transfer record is altered, fabricated, or unverified.`
       );
     }
   }
@@ -344,7 +401,7 @@ export function issueAuthenticatedDatabaseClaims(
     }
 
     // Verify registry authoritativeness and canonical consistency
-    verifyRegistryAuthoritativeness(registry, agentRecord, context.principalLevel);
+    verifyRegistryAuthoritativeness(registry, agentRecord, context.principalLevel, secret);
 
     resolvedIsOwner = false;
     resolvedAgentId = agentRecord.id;

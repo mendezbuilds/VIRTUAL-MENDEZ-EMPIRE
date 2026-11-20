@@ -401,6 +401,7 @@ export interface ConsequentialPolicyEngineOptions {
   policies?: Partial<Record<ConsequentialActionType, ConsequentialPolicyRule>>;
   authService?: OwnerAuthenticationService;
   departmentRegistry?: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider;
+  isTestMode?: boolean;
 }
 
 /**
@@ -414,14 +415,19 @@ export class ConsequentialPolicyEngine {
   private readonly tenantId: string;
   private readonly policies: Record<ConsequentialActionType, ConsequentialPolicyRule>;
   public readonly authService: OwnerAuthenticationService;
-  public readonly departmentRegistry: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider;
+  public readonly departmentRegistry?: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider;
 
   constructor(options?: ConsequentialPolicyEngineOptions) {
     this.pool = options?.pool;
     this.tenantId = options?.tenantId ?? '00000000-0000-0000-0000-000000000001';
     this.policies = { ...CANONICAL_CONSEQUENTIAL_POLICIES, ...(options?.policies ?? {}) };
     this.authService = options?.authService ?? new OwnerAuthenticationService();
-    this.departmentRegistry = options?.departmentRegistry ?? new DepartmentRegistry();
+    if (this.pool && !options?.departmentRegistry && !options?.isTestMode) {
+      throw new Error(
+        'Production policy engine initialization failed: Authoritative workforce registry or identity provider must be explicitly supplied when database pool is configured. Implicit registry construction is strictly prohibited.'
+      );
+    }
+    this.departmentRegistry = options?.departmentRegistry;
   }
 
   /**

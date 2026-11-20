@@ -23,6 +23,7 @@ import {
 import {
   DepartmentTransferCoordinator,
   type TransferAgentParams,
+  type AuthoritativeTransferRecord,
 } from './transfer-coordinator.js';
 import {
   OrganizationalAuditor,
@@ -311,6 +312,13 @@ export class DepartmentRegistry {
    */
   getLeadershipHistory(departmentId?: DepartmentId): LeadershipAppointmentRecord[] {
     return this.leadershipManager.getLeadershipHistory(departmentId);
+  }
+
+  /**
+   * Returns authoritative department transfer audit history.
+   */
+  getTransferHistory(agentIdOrCode?: string): AuthoritativeTransferRecord[] {
+    return this.transferCoordinator.getTransferHistory(agentIdOrCode);
   }
 
   /**

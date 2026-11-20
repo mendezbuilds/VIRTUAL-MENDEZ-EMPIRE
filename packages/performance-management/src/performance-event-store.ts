@@ -21,17 +21,27 @@ export interface PerformanceEvent {
   recordedAt?: string;
 }
 
+export interface PerformanceEventStoreOptions {
+  isTestMode?: boolean;
+}
+
 export class PerformanceEventStore {
   private inMemoryEvents: PerformanceEvent[] = [];
   private inMemoryReviews = new Map<string, PerformanceReviewRecord[]>();
-  private readonly departmentRegistry: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider;
+  private readonly departmentRegistry?: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider;
 
   constructor(
     private readonly pool?: Pool,
     private readonly tenantId: string = '00000000-0000-0000-0000-000000000001',
-    departmentRegistry?: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider
+    departmentRegistry?: DepartmentRegistry | AuthoritativeWorkforceIdentityProvider,
+    options?: PerformanceEventStoreOptions
   ) {
-    this.departmentRegistry = departmentRegistry ?? new DepartmentRegistry();
+    if (this.pool && !departmentRegistry && !options?.isTestMode) {
+      throw new Error(
+        'Production performance event store initialization failed: Authoritative workforce registry or identity provider must be explicitly supplied in production mode. Implicit registry fallback is strictly prohibited.'
+      );
+    }
+    this.departmentRegistry = departmentRegistry;
   }
 
   async recordEvent(event: PerformanceEvent): Promise<PerformanceEvent> {

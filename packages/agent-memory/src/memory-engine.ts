@@ -83,10 +83,15 @@ export class AgentMemoryEngine {
           'Production memory engine initialization failed: PostgreSQL connection pool is required. In-memory fallback is disabled in production.'
         );
       }
+      if (!options?.departmentRegistry) {
+        throw new PostgresStorageError(
+          'Production memory engine initialization failed: Authoritative workforce registry or identity provider must be explicitly supplied in production mode. Implicit registry fallback is strictly prohibited.'
+        );
+      }
       const pool = options.pool;
       const tenantId = options.defaultTenantId ?? '00000000-0000-0000-0000-000000000001';
       const defaultAgentId = options.defaultAgentId ?? '00000000-0000-0000-0000-000000000008';
-      const departmentRegistry = options.departmentRegistry ?? new DepartmentRegistry();
+      const departmentRegistry = options.departmentRegistry;
       // Secure least-privilege default RlsSessionContext for standard agent operations (never defaults to OWNER)
       const rlsContext: RlsSessionContext = {
         tenantId,

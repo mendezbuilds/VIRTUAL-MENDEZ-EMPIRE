@@ -209,6 +209,7 @@ export const DepartmentTransferRecordSchema = z
     authorizedBy: z.string().min(1), // e.g. Owner principal ID or CEO
     previousConfigVersion: z.string().regex(/^\d+\.\d+\.\d+$/, { message: 'Must be valid SemVer X.Y.Z' }),
     newConfigVersion: z.string().regex(/^\d+\.\d+\.\d+$/, { message: 'Must be valid SemVer X.Y.Z' }),
+    authorizationSignature: z.string().optional(),
   })
   .strict();
 
@@ -479,6 +480,8 @@ export function transferAgentDepartment(
     newJobTitle?: string;
     newSupervisor?: AgentSupervisor;
     newVersion?: string;
+    transferId?: string;
+    authorizationSignature?: string;
     knownAgents?: AgentRecord[];
     knownDepartments?: Department[];
   }
@@ -546,8 +549,9 @@ export function transferAgentDepartment(
   }
 
   // 6. Construct transfer record
+  const transferId = params.transferId ?? randomUUID();
   const transferRecord: DepartmentTransferRecord = Object.freeze({
-    transferId: randomUUID(),
+    transferId,
     fromDepartmentId,
     toDepartmentId: params.toDepartmentId,
     effectiveDate,
@@ -555,6 +559,7 @@ export function transferAgentDepartment(
     authorizedBy: params.authorizedBy,
     previousConfigVersion: record.currentConfig.configVersion,
     newConfigVersion: nextVersion,
+    ...(params.authorizationSignature ? { authorizationSignature: params.authorizationSignature } : {}),
   });
 
   // 7. Deep clone and freeze existing transfer history to prevent retrospective modification

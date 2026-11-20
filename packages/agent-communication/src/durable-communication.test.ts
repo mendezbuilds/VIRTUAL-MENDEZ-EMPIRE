@@ -275,7 +275,7 @@ describe('Durable Agent Communication & Consequential Policy Lifecycle', () => {
         secretKey: testSigningSecret,
         requiredCredentials: testOwnerCredentials,
       });
-      engine = new ConsequentialPolicyEngine({ pool, tenantId, authService });
+      engine = new ConsequentialPolicyEngine({ pool, tenantId, authService, departmentRegistry: hierarchy });
       const router = new MessageRouter(hierarchy);
       delegation = new DelegationManager(hierarchy, router, engine);
     });
@@ -368,6 +368,7 @@ describe('Durable Agent Communication & Consequential Policy Lifecycle', () => {
         pool,
         tenantId,
         authService,
+        departmentRegistry: hierarchy,
         policies: {
           CAPITAL_TRANSFER: {
             actionType: 'CAPITAL_TRANSFER',
