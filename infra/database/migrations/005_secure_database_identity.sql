@@ -2,7 +2,7 @@
 -- VIRTUAL MENDEZ EMPIRE — SECURE DATABASE IDENTITY & VERIFIED ABAC CONTEXT
 -- Migration: 005_secure_database_identity.sql
 -- Enforces: Cryptographically Verified Database Identity Claims
--- Protects against: Caller-Supplied GUC Forgery and Privilege Elevation
+-- Protects against: Caller-Supplied GUC Forgery, Secret Tampering, Privilege Elevation
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
@@ -18,18 +18,34 @@ CREATE TABLE IF NOT EXISTS system_auth_secrets (
 );
 
 -- Deny all direct access to PUBLIC, vme_app, and vme_readonly
--- Only superuser / database owner can access this table directly
+-- Only superuser / database administrator can access this table directly
 REVOKE ALL ON system_auth_secrets FROM PUBLIC, vme_app, vme_readonly;
 
--- Seed canonical default session signing secret
-INSERT INTO system_auth_secrets (key_name, secret_value)
-VALUES ('session_signing_secret', 'vme-canonical-db-auth-hmac-secret-2026')
-ON CONFLICT (key_name) DO UPDATE SET 
-  secret_value = EXCLUDED.secret_value,
-  updated_at = clock_timestamp();
+-- ----------------------------------------------------------------------------
+-- 2. ADMINISTRATIVE SECRET PROVISIONING PROCEDURE (SUPERUSER ONLY)
+-- ----------------------------------------------------------------------------
+-- High-entropy signing secret must be independently provisioned during setup.
+-- Hardcoded, default, or repository-known secrets are strictly prohibited.
+CREATE OR REPLACE FUNCTION provision_session_signing_secret(p_secret TEXT)
+RETURNS VOID AS $$
+BEGIN
+  IF p_secret IS NULL OR length(trim(p_secret)) < 32 THEN
+    RAISE EXCEPTION 'CRITICAL SECURITY VIOLATION: Database session signing secret must be independently provisioned with at least 32 characters of high entropy. Failing closed.';
+  END IF;
+
+  INSERT INTO system_auth_secrets (key_name, secret_value, updated_at)
+  VALUES ('session_signing_secret', trim(p_secret), clock_timestamp())
+  ON CONFLICT (key_name) DO UPDATE SET 
+    secret_value = EXCLUDED.secret_value,
+    updated_at = clock_timestamp();
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public;
+
+-- Revoke all execution privileges on secret provisioning from PUBLIC and unprivileged roles
+REVOKE ALL ON FUNCTION provision_session_signing_secret(TEXT) FROM PUBLIC, vme_app, vme_readonly;
 
 -- ----------------------------------------------------------------------------
--- 2. CANONICAL CLAIMS FORMATTER & VERIFICATION FUNCTIONS
+-- 3. CANONICAL CLAIMS FORMATTER & VERIFICATION FUNCTIONS
 -- ----------------------------------------------------------------------------
 
 -- Canonicalize JSON claims into an immutable, deterministically-ordered string
@@ -47,9 +63,9 @@ BEGIN
     COALESCE(claims->>'nonce', '')
   );
 END;
-$$ LANGUAGE plpgsql IMMUTABLE;
+$$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, public;
 
--- Internal helper: verifies current session claims against isolated signing secret
+-- Internal helper: verifies current session claims against isolated provisioned secret
 CREATE OR REPLACE FUNCTION get_verified_claims()
 RETURNS JSONB AS $$
 DECLARE
@@ -76,7 +92,8 @@ BEGIN
   END;
 
   SELECT secret_value INTO v_secret FROM system_auth_secrets WHERE key_name = 'session_signing_secret';
-  IF v_secret IS NULL THEN
+  IF v_secret IS NULL OR length(trim(v_secret)) < 32 THEN
+    -- Secret missing or unprovisioned: fail closed immediately
     RETURN NULL;
   END IF;
 
@@ -112,8 +129,8 @@ BEGIN
   END IF;
 
   SELECT secret_value INTO v_secret FROM system_auth_secrets WHERE key_name = 'session_signing_secret';
-  IF v_secret IS NULL THEN
-    RAISE EXCEPTION 'CRITICAL SECURITY VIOLATION: Database session signing secret not configured';
+  IF v_secret IS NULL OR length(trim(v_secret)) < 32 THEN
+    RAISE EXCEPTION 'CRITICAL SECURITY VIOLATION: Database session signing secret not provisioned. System failed closed.';
   END IF;
 
   v_expires_at := (claims->>'expiresAt')::BIGINT;
@@ -167,7 +184,7 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public;
 
 -- ----------------------------------------------------------------------------
--- 3. HARDENED ABAC & SESSION CONTEXT SECURITY FUNCTIONS
+-- 4. HARDENED ABAC & SESSION CONTEXT SECURITY FUNCTIONS
 -- ----------------------------------------------------------------------------
 -- These functions NO LONGER trust arbitrary caller-supplied GUC values.
 -- They strictly extract attributes from cryptographically verified claims.
@@ -255,8 +272,29 @@ END;
 $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, public;
 
 -- ----------------------------------------------------------------------------
--- 4. GRANTS TO LEAST-PRIVILEGE ROLES
+-- 5. FUNCTION PERMISSION HARDENING & LEAST-PRIVILEGE GRANTS
 -- ----------------------------------------------------------------------------
+
+-- Explicitly revoke all execution privileges from PUBLIC on all security-definer and context functions
+REVOKE ALL ON FUNCTION canonicalize_claims(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION get_verified_claims() FROM PUBLIC;
+REVOKE ALL ON FUNCTION set_authenticated_session(JSONB, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION set_authenticated_session(JSON, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION clear_authenticated_session() FROM PUBLIC;
+REVOKE ALL ON FUNCTION provision_session_signing_secret(TEXT) FROM PUBLIC;
+
+REVOKE ALL ON FUNCTION get_current_tenant_id() FROM PUBLIC;
+REVOKE ALL ON FUNCTION get_current_agent_id() FROM PUBLIC;
+REVOKE ALL ON FUNCTION get_current_department_id() FROM PUBLIC;
+REVOKE ALL ON FUNCTION get_current_principal_level() FROM PUBLIC;
+REVOKE ALL ON FUNCTION is_current_principal_owner() FROM PUBLIC;
+REVOKE ALL ON FUNCTION is_current_principal_executive() FROM PUBLIC;
+REVOKE ALL ON FUNCTION is_current_principal_director() FROM PUBLIC;
+
+-- Ensure ordinary roles CANNOT provision or alter the signing secret
+REVOKE ALL ON FUNCTION provision_session_signing_secret(TEXT) FROM vme_app, vme_readonly;
+
+-- Grant only the minimum required execution privileges to application and audit roles
 GRANT EXECUTE ON FUNCTION canonicalize_claims(JSONB) TO vme_app, vme_readonly;
 GRANT EXECUTE ON FUNCTION get_verified_claims() TO vme_app, vme_readonly;
 GRANT EXECUTE ON FUNCTION set_authenticated_session(JSONB, TEXT) TO vme_app, vme_readonly;
@@ -270,3 +308,6 @@ GRANT EXECUTE ON FUNCTION get_current_principal_level() TO vme_app, vme_readonly
 GRANT EXECUTE ON FUNCTION is_current_principal_owner() TO vme_app, vme_readonly;
 GRANT EXECUTE ON FUNCTION is_current_principal_executive() TO vme_app, vme_readonly;
 GRANT EXECUTE ON FUNCTION is_current_principal_director() TO vme_app, vme_readonly;
+
+-- Alter default privileges in public schema to ensure future functions are not executable by PUBLIC
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;

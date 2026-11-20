@@ -161,8 +161,7 @@ export class PerformanceEventStore {
       try {
         await applyAuthenticatedSession(client, {
           tenantId: this.tenantId,
-          agentId: review.agentId,
-          departmentId: review.departmentId,
+          agentCode: 'EXEC-CEO',
           principalLevel: 'EXECUTIVE',
         });
 

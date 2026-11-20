@@ -209,6 +209,9 @@ importers:
 
   packages/agent-memory:
     dependencies:
+      '@vme/department-hierarchy':
+        specifier: workspace:*
+        version: link:../department-hierarchy
       '@vme/security-governance':
         specifier: workspace:*
         version: link:../security-governance

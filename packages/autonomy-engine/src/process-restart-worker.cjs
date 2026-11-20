@@ -18,7 +18,11 @@ if (!mode || !tenantId || !agentId || !taskId) {
   process.exit(1);
 }
 
-const DB_SESSION_SECRET = process.env.DB_SESSION_SECRET || 'vme-canonical-db-auth-hmac-secret-2026';
+const DB_SESSION_SECRET = process.env.DB_SESSION_SECRET;
+if (!DB_SESSION_SECRET || DB_SESSION_SECRET.trim().length < 32) {
+  console.error('CRITICAL: DB_SESSION_SECRET is required and must have at least 32 characters of entropy.');
+  process.exit(1);
+}
 
 function signClaims(claims) {
   const canonical = [

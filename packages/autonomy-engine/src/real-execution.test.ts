@@ -23,6 +23,7 @@ describe('M2.5 Real Execution Adapters & Task Execution Records', () => {
   const tenantId = '00000000-0000-0000-0000-000000000001';
 
   beforeEach(async () => {
+    process.env.DB_SESSION_SECRET = 'test-secret-with-at-least-32-chars-entropy-abc123';
     hierarchy = new DepartmentRegistry();
     supervisor = new EmergencySupervisor(undefined, false);
 

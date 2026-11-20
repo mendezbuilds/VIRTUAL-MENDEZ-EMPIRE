@@ -1,6 +1,8 @@
 import { randomUUID, createHmac, randomBytes } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import {
+  OWNER_PRINCIPAL_ID,
+  CANONICAL_OWNER_PRINCIPAL,
   type EpisodicMemoryRecord,
   type SemanticKnowledgeItem,
   type ProceduralPlaybook,
@@ -11,6 +13,8 @@ import {
   SemanticKnowledgeItemSchema,
   ProceduralPlaybookSchema,
 } from '@vme/shared-types';
+import { verifyOwnerSessionToken } from '@vme/security-governance';
+import { DepartmentRegistry } from '@vme/department-hierarchy';
 import type { EpisodicMemoryFilter, EpisodicMemoryStorage } from './episodic-memory.js';
 import type { SemanticSearchFilter, SemanticSearchResult, SemanticStorage } from './semantic-memory.js';
 import type { ProceduralQueryFilter, ProceduralStorage } from './procedural-memory.js';
@@ -24,9 +28,11 @@ import type { WorkingMemoryStorage } from './working-memory.js';
 export interface RlsSessionContext {
   tenantId: string;
   agentId?: string;
+  agentCode?: string;
   departmentId?: string;
   principalLevel?: string;
   isOwnerAuthenticated?: boolean;
+  ownerSession?: unknown;
 }
 
 export class PostgresStorageError extends Error {
@@ -36,12 +42,19 @@ export class PostgresStorageError extends Error {
   }
 }
 
-export const CANONICAL_DB_SESSION_SECRET = 'vme-canonical-db-auth-hmac-secret-2026';
-
+/**
+ * Retrieves the independently provisioned high-entropy database signing secret.
+ * Fails closed if the secret is missing or has insufficient entropy (< 32 characters).
+ * Development or canonical fallback secrets are strictly prohibited.
+ */
 export function getDatabaseSessionSecret(): string {
-  return process.env.DB_SESSION_SECRET?.trim().length
-    ? process.env.DB_SESSION_SECRET
-    : CANONICAL_DB_SESSION_SECRET;
+  const secret = process.env.DB_SESSION_SECRET?.trim();
+  if (!secret || secret.length < 32) {
+    throw new PostgresStorageError(
+      'CRITICAL SECURITY CONFIGURATION ERROR: DB_SESSION_SECRET must be independently provisioned with at least 32 characters of high entropy. Failing closed; fallback secrets are strictly prohibited.'
+    );
+  }
+  return secret;
 }
 
 export interface DatabaseSessionClaims {
@@ -87,28 +100,151 @@ export function signDatabaseClaims(
 }
 
 /**
+ * Issues authenticated database session claims.
+ * Strictly verifies privileged claims:
+ * - Owner claims REQUIRE a verified Owner session (cryptographically verified token);
+ *   caller-supplied booleans are rejected.
+ * - Executive/Director claims MUST originate from trusted organizational workforce records
+ *   (DepartmentRegistry); elevation attempts are rejected.
+ * - Ordinary specialist sessions remain strictly unprivileged.
+ */
+export function issueAuthenticatedDatabaseClaims(
+  context: RlsSessionContext,
+  secret: string = getDatabaseSessionSecret(),
+  departmentRegistry?: DepartmentRegistry
+): { claimsPayload: Record<string, unknown>; signature: string } {
+  if (!context.tenantId || context.tenantId.trim().length === 0) {
+    throw new PostgresStorageError('Database session claims issuance failed: tenantId is required.');
+  }
+
+  const expiresAt = Math.floor(Date.now() / 1000) + 3600; // 1 hour TTL
+  const nonce = randomBytes(8).toString('hex');
+
+  const wantsOwner = context.isOwnerAuthenticated === true || context.principalLevel === 'OWNER';
+  const wantsExecutive = context.principalLevel === 'EXECUTIVE';
+  const wantsDirector = context.principalLevel === 'DIRECTOR';
+
+  let resolvedAgentId = '';
+  let resolvedDepartmentId = '';
+  let resolvedLevel = 'SPECIALIST';
+  let resolvedIsOwner = false;
+
+  if (wantsOwner) {
+    // 1. Privileged Owner Claims Issuance: MUST be verified through Owner session
+    if (!context.ownerSession) {
+      throw new PostgresStorageError(
+        'Privileged database identity issuance rejected: Owner claims require an authenticated Owner session (ownerSession). Caller-supplied booleans or strings are strictly rejected.'
+      );
+    }
+
+    try {
+      const verified = verifyOwnerSessionToken(context.ownerSession);
+      if (!verified || !verified.sessionId) {
+        throw new Error('Missing verified session identity.');
+      }
+    } catch (err: unknown) {
+      throw new PostgresStorageError(
+        `Privileged database identity issuance rejected: Owner session verification failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    resolvedIsOwner = true;
+    resolvedLevel = 'OWNER';
+    resolvedAgentId = OWNER_PRINCIPAL_ID;
+    resolvedDepartmentId = 'executive_office';
+  } else if (wantsExecutive || wantsDirector) {
+    // 2. Privileged Executive/Director Claims Issuance: MUST originate from trusted organizational records
+    const agentLookup = context.agentId || context.agentCode;
+    if (!agentLookup) {
+      throw new PostgresStorageError(
+        'Privileged database identity issuance rejected: Executive/Director claims require a valid organizational agent identifier.'
+      );
+    }
+
+    const registry = departmentRegistry ?? new DepartmentRegistry();
+    const agentRecord = registry.getAgentRecord(agentLookup);
+
+    if (!agentRecord) {
+      throw new PostgresStorageError(
+        `Privileged database identity issuance rejected: Agent '${agentLookup}' is not a registered workforce agent in trusted organizational records.`
+      );
+    }
+
+    if (wantsExecutive && agentRecord.level !== 'EXECUTIVE') {
+      throw new PostgresStorageError(
+        `Privileged database identity issuance rejected: Agent '${agentRecord.agentCode}' is registered with level '${agentRecord.level}', not 'EXECUTIVE'. Elevation prohibited.`
+      );
+    }
+
+    if (wantsDirector && agentRecord.level !== 'DIRECTOR' && agentRecord.level !== 'EXECUTIVE') {
+      throw new PostgresStorageError(
+        `Privileged database identity issuance rejected: Agent '${agentRecord.agentCode}' is registered with level '${agentRecord.level}', not 'DIRECTOR'. Elevation prohibited.`
+      );
+    }
+
+    resolvedIsOwner = false;
+    resolvedLevel = agentRecord.level;
+    resolvedAgentId = agentRecord.id;
+    resolvedDepartmentId = agentRecord.departmentId;
+  } else {
+    // 3. Ordinary Specialist Claims Issuance: strictly unprivileged
+    const agentLookup = context.agentId || context.agentCode;
+    if (agentLookup) {
+      const registry = departmentRegistry ?? new DepartmentRegistry();
+      const agentRecord = registry.getAgentRecord(agentLookup);
+      if (agentRecord) {
+        resolvedAgentId = agentRecord.id;
+        resolvedDepartmentId = agentRecord.departmentId;
+        resolvedLevel = agentRecord.level === 'EXECUTIVE' || agentRecord.level === 'DIRECTOR' ? agentRecord.level : 'SPECIALIST';
+      } else {
+        resolvedAgentId = context.agentId ?? '';
+        resolvedDepartmentId = context.departmentId && context.departmentId !== 'executive_office' ? context.departmentId : '';
+        resolvedLevel = 'SPECIALIST';
+      }
+    } else {
+      resolvedAgentId = '';
+      resolvedDepartmentId = context.departmentId && context.departmentId !== 'executive_office' ? context.departmentId : '';
+      resolvedLevel = 'SPECIALIST';
+    }
+    resolvedIsOwner = false;
+  }
+
+  const claimsPayload: Record<string, unknown> = {
+    tenantId: context.tenantId,
+    agentId: resolvedAgentId,
+    departmentId: resolvedDepartmentId,
+    principalLevel: resolvedLevel,
+    isOwner: resolvedIsOwner,
+    expiresAt,
+    nonce,
+  };
+
+  const canonical = [
+    claimsPayload.tenantId ?? '',
+    claimsPayload.agentId ?? '',
+    claimsPayload.departmentId ?? '',
+    claimsPayload.principalLevel ?? 'SPECIALIST',
+    claimsPayload.isOwner === true ? 'true' : 'false',
+    String(claimsPayload.expiresAt ?? 0),
+    claimsPayload.nonce ?? '',
+  ].join(':');
+
+  const signature = createHmac('sha256', secret).update(canonical).digest('hex');
+
+  return { claimsPayload, signature };
+}
+
+/**
  * Applies authenticated session identity to a client connection.
  * Authenticates cryptographically against database-stored secret, eliminating trust in raw GUC values.
  */
 export async function applyAuthenticatedSession(
   client: { query: (text: string, values?: any[]) => Promise<any> },
   context: RlsSessionContext,
-  secret: string = getDatabaseSessionSecret()
+  secret: string = getDatabaseSessionSecret(),
+  departmentRegistry?: DepartmentRegistry
 ): Promise<void> {
-  const expiresAt = Math.floor(Date.now() / 1000) + 3600; // 1 hour validity
-  const nonce = randomBytes(8).toString('hex');
-  const { claimsPayload, signature } = signDatabaseClaims(
-    {
-      tenantId: context.tenantId,
-      agentId: context.agentId,
-      departmentId: context.departmentId,
-      principalLevel: context.principalLevel,
-      isOwner: context.isOwnerAuthenticated === true,
-      expiresAt,
-      nonce,
-    },
-    secret
-  );
+  const { claimsPayload, signature } = issueAuthenticatedDatabaseClaims(context, secret, departmentRegistry);
 
   try {
     await client.query(`SELECT set_authenticated_session($1::jsonb, $2)`, [
@@ -126,11 +262,11 @@ export async function applyAuthenticatedSession(
           set_config('app.current_principal_level', $4, false),
           set_config('app.is_owner_authenticated', $5, false)`,
         [
-          context.tenantId,
-          context.agentId ?? '',
-          context.departmentId ?? '',
-          context.principalLevel ?? 'SPECIALIST',
-          context.isOwnerAuthenticated === true ? 'true' : 'false',
+          claimsPayload.tenantId,
+          claimsPayload.agentId,
+          claimsPayload.departmentId,
+          claimsPayload.principalLevel,
+          claimsPayload.isOwner ? 'true' : 'false',
         ]
       );
     } else {

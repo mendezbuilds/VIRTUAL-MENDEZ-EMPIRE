@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes, createHmac } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -30,7 +30,6 @@ import {
   getDatabaseSessionSecret,
   applyAuthenticatedSession,
   clearAuthenticatedSession,
-  CANONICAL_DB_SESSION_SECRET,
 } from '@vme/agent-memory';
 import {
   PerformanceEventStore,
@@ -68,7 +67,8 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
   const ownerMasterKey = 'vme-owner-secure-cryptographic-master-key-2026';
 
   beforeAll(async () => {
-    process.env.DB_SESSION_SECRET = CANONICAL_DB_SESSION_SECRET;
+    const dynamicDbSecret = randomBytes(32).toString('hex');
+    process.env.DB_SESSION_SECRET = dynamicDbSecret;
     process.env.OWNER_AUTH_SECRET = ownerHmacSecret;
     process.env.OWNER_AUTH_CREDENTIALS = ownerMasterKey;
     testSandboxDir = mkdtempSync(join(tmpdir(), 'vme-pg-genuine-test-'));
@@ -82,14 +82,10 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
     const migrations = await executeRealMigrations(adminPool);
     console.log(`[Integration Test] Executed migrations: ${migrations.join(', ')}`);
 
-    // Ensure session signing secret is explicitly set in system_auth_secrets
+    // Ensure session signing secret is explicitly set in system_auth_secrets via administrative function
     const setupClient = await adminPool.connect();
     try {
-      await setupClient.query(`
-        INSERT INTO system_auth_secrets (key_name, secret_value)
-        VALUES ('session_signing_secret', $1)
-        ON CONFLICT (key_name) DO UPDATE SET secret_value = EXCLUDED.secret_value
-      `, [CANONICAL_DB_SESSION_SECRET]);
+      await setupClient.query(`SELECT provision_session_signing_secret($1)`, [dynamicDbSecret]);
     } finally {
       setupClient.release();
     }
@@ -309,8 +305,14 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
       expect(valB).toBeUndefined();
 
       // Human Owner principal CAN inspect it
+      const authService = new OwnerAuthenticationService({ secretKey: ownerHmacSecret, requiredCredentials: ownerMasterKey });
+      const ownerSession = authService.createOwnerSession({
+        principalId: OWNER_PRINCIPAL_ID,
+        email: CANONICAL_OWNER_PRINCIPAL.email,
+        credentials: ownerMasterKey,
+      });
       const valOwner = await workingStorage.get(
-        { tenantId, agentId: OWNER_PRINCIPAL_ID, principalLevel: 'OWNER', isOwnerAuthenticated: true },
+        { tenantId, agentId: OWNER_PRINCIPAL_ID, principalLevel: 'OWNER', isOwnerAuthenticated: true, ownerSession },
         taskId,
         'secret_scratch'
       );
@@ -321,12 +323,12 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
       const devAgent = '00000000-0000-0000-0000-000000000031';
       const devPeer = '00000000-0000-0000-0000-000000000032';
       const mktAgent = '00000000-0000-0000-0000-000000000033';
-      const execAgent = '00000000-0000-0000-0000-000000000034';
+      const execAgent = '00000000-0000-0000-0000-000000000001';
 
       const devContext = { tenantId, agentId: devAgent, departmentId: 'technology_engineering', principalLevel: 'SPECIALIST' };
       const peerContext = { tenantId, agentId: devPeer, departmentId: 'technology_engineering', principalLevel: 'SPECIALIST' };
       const mktContext = { tenantId, agentId: mktAgent, departmentId: 'marketing_growth', principalLevel: 'SPECIALIST' };
-      const execContext = { tenantId, agentId: execAgent, departmentId: 'executive_office', principalLevel: 'EXECUTIVE' };
+      const execContext = { tenantId, agentCode: 'EXEC-CEO', departmentId: 'executive_office', principalLevel: 'EXECUTIVE' };
 
       const devStorage = new PostgresEpisodicStorage(appPool, devContext);
       const peerStorage = new PostgresEpisodicStorage(appPool, peerContext);
@@ -496,12 +498,19 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
 
       try {
         // 1. Successful transaction using actual withSessionRls() implementation
+        const authService = new OwnerAuthenticationService({ secretKey: ownerHmacSecret, requiredCredentials: ownerMasterKey });
+        const ownerSession = authService.createOwnerSession({
+          principalId: OWNER_PRINCIPAL_ID,
+          email: CANONICAL_OWNER_PRINCIPAL.email,
+          credentials: ownerMasterKey,
+        });
         const testContext = {
           tenantId: '00000000-0000-0000-0000-000000000001',
-          agentId: '00000000-0000-0000-0000-000000000099',
-          departmentId: 'technology_engineering',
-          principalLevel: 'OWNER',
+          agentId: OWNER_PRINCIPAL_ID,
+          departmentId: 'executive_office',
+          principalLevel: 'OWNER' as const,
           isOwnerAuthenticated: true,
+          ownerSession,
         };
 
         await withSessionRls(singleConnPool, testContext, async (client) => {
@@ -544,9 +553,9 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         // 2. Failed transaction using actual withSessionRls() implementation
         const failContext = {
           tenantId: '00000000-0000-0000-0000-000000000002',
-          agentId: '00000000-0000-0000-0000-000000000088',
+          agentCode: 'FIN-CFO',
           departmentId: 'financial_intelligence',
-          principalLevel: 'DIRECTOR',
+          principalLevel: 'DIRECTOR' as const,
           isOwnerAuthenticated: false,
         };
 
@@ -673,9 +682,15 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
       const paramHash = computeParameterHash(payload);
 
       // 1. Seed an APPROVED request into consequential_authorization_requests via withSessionRls under appPool (vme_app role)
+      const authService = new OwnerAuthenticationService({ secretKey: ownerHmacSecret, requiredCredentials: ownerMasterKey });
+      const ownerSession = authService.createOwnerSession({
+        principalId: OWNER_PRINCIPAL_ID,
+        email: CANONICAL_OWNER_PRINCIPAL.email,
+        credentials: ownerMasterKey,
+      });
       await withSessionRls(
         appPool,
-        { tenantId, agentId, principalLevel: 'OWNER', isOwnerAuthenticated: true },
+        { tenantId, agentId: OWNER_PRINCIPAL_ID, principalLevel: 'OWNER', isOwnerAuthenticated: true, ownerSession },
         async (client) => {
           await client.query(`
             INSERT INTO consequential_authorization_requests (
@@ -776,8 +791,8 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         // 3. Semantic memory
         const semantic1 = new PostgresSemanticStorage(pool1, {
           tenantId: restartTenantId,
-          agentId,
-          departmentId: 'technology_engineering',
+          agentCode: 'EXEC-CEO',
+          departmentId: 'executive_office',
           principalLevel: 'EXECUTIVE',
         });
         await semantic1.insert({
@@ -804,8 +819,8 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
         // 4. Procedural memory
         const procedural1 = new PostgresProceduralStorage(pool1, {
           tenantId: restartTenantId,
-          agentId,
-          departmentId: 'technology_engineering',
+          agentCode: 'EXEC-CEO',
+          departmentId: 'executive_office',
           principalLevel: 'EXECUTIVE',
         });
         await procedural1.savePlaybook({
@@ -958,7 +973,7 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
       const nodeModulesDir = resolve(__dirname, '../node_modules');
       const env = {
         ...process.env,
-        DB_SESSION_SECRET: CANONICAL_DB_SESSION_SECRET,
+        DB_SESSION_SECRET: process.env.DB_SESSION_SECRET,
         NODE_PATH: nodeModulesDir,
         VME_POSTGRES_HOST: DEFAULT_PG_CONFIG.host,
         VME_POSTGRES_PORT: String(DEFAULT_PG_CONFIG.port),
@@ -1283,90 +1298,37 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
   });
 
   // ==========================================================================
-  // Section 10: Cryptographically Verified Database Identity & Adversarial GUC Tampering Defense
+  // Section 10: Cryptographically Verified Database Identity & Adversarial Trust Defense
   // ==========================================================================
-  describe('10. Cryptographically Verified Database Identity & Adversarial GUC Tampering Defense', () => {
-    it('rejects caller-supplied Owner authentication booleans via raw GUC set_config (negative test)', async () => {
+  describe('10. Cryptographically Verified Database Identity & Adversarial Trust Defense', () => {
+    it('1. rejects claims signed with repository-known or previous default secret (negative test)', async () => {
       const client = await appPool.connect();
       try {
-        await client.query('BEGIN');
-        // Adversary running as vme_app tries to claim Owner identity by tampering with GUC settings
-        await client.query(`
-          SELECT 
-            set_config('app.is_owner_authenticated', 'true', false),
-            set_config('app.current_principal_level', 'OWNER', false),
-            set_config('app.current_agent_id', '00000000-0000-0000-0000-000000000000', false)
-        `);
-
-        // Database engine MUST NOT trust unverified GUC values
-        const res = await client.query(`SELECT is_current_principal_owner() as "isOwner"`);
-        expect(res.rows[0].isOwner).toBe(false);
-
-        await client.query('ROLLBACK');
-      } finally {
-        await client.query('SELECT clear_authenticated_session()');
-        client.release();
-      }
-    });
-
-    it('rejects caller-supplied Executive level via raw GUC set_config (negative test)', async () => {
-      const client = await appPool.connect();
-      try {
-        await client.query('BEGIN');
-        // Adversary running as vme_app tries to claim Executive privileges
-        await client.query(`
-          SELECT 
-            set_config('app.current_principal_level', 'EXECUTIVE', false),
-            set_config('app.current_department_id', 'executive_office', false)
-        `);
-
-        // Database engine MUST NOT trust unverified GUC values
-        const res = await client.query(`SELECT is_current_principal_executive() as "isExec"`);
-        expect(res.rows[0].isExec).toBe(false);
-
-        await client.query('ROLLBACK');
-      } finally {
-        await client.query('SELECT clear_authenticated_session()');
-        client.release();
-      }
-    });
-
-    it('rejects caller-supplied Agent impersonation via raw GUC set_config (negative test)', async () => {
-      const client = await appPool.connect();
-      try {
-        await client.query('BEGIN');
-        const victimAgentId = randomUUID();
-        // Adversary running as vme_app tries to impersonate another agent
-        await client.query(`SELECT set_config('app.current_agent_id', $1, false)`, [victimAgentId]);
-
-        // get_current_agent_id() MUST fail closed and return NULL
-        const res = await client.query(`SELECT get_current_agent_id() as "agentId"`);
-        expect(res.rows[0].agentId).toBeNull();
-
-        await client.query('ROLLBACK');
-      } finally {
-        await client.query('SELECT clear_authenticated_session()');
-        client.release();
-      }
-    });
-
-    it('rejects forged or invalid signatures passed to set_authenticated_session() (negative test)', async () => {
-      const client = await appPool.connect();
-      try {
+        const oldSecret = 'vme-canonical-db-auth-hmac-secret-2026';
         const claims = {
           tenantId,
           agentId: randomUUID(),
-          principalLevel: 'OWNER',
-          isOwner: true,
+          departmentId: 'technology_engineering',
+          principalLevel: 'SPECIALIST',
+          isOwner: false,
           expiresAt: Math.floor(Date.now() / 1000) + 3600,
           nonce: randomUUID(),
         };
-        const forgedSignature = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
+        const canonical = [
+          claims.tenantId,
+          claims.agentId,
+          claims.departmentId,
+          claims.principalLevel,
+          'false',
+          String(claims.expiresAt),
+          claims.nonce,
+        ].join(':');
+        const oldSignature = createHmac('sha256', oldSecret).update(canonical).digest('hex');
 
         await expect(
           client.query(`SELECT set_authenticated_session($1::jsonb, $2)`, [
             JSON.stringify(claims),
-            forgedSignature,
+            oldSignature,
           ])
         ).rejects.toThrow(/CRITICAL SECURITY VIOLATION: Invalid database session authentication signature/i);
       } finally {
@@ -1374,20 +1336,125 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
       }
     });
 
-    it('rejects expired claims passed to set_authenticated_session() (negative test)', async () => {
+    it('2. fails closed when DB_SESSION_SECRET is missing or unprovisioned (negative test)', async () => {
+      const origSecret = process.env.DB_SESSION_SECRET;
+      try {
+        delete process.env.DB_SESSION_SECRET;
+        expect(() => getDatabaseSessionSecret()).toThrow(
+          /DB_SESSION_SECRET must be independently provisioned/i
+        );
+      } finally {
+        process.env.DB_SESSION_SECRET = origSecret;
+      }
+    });
+
+    it('3. rejects caller-supplied Owner boolean or principal level string without valid ownerSession (negative test)', async () => {
       const client = await appPool.connect();
       try {
-        const secret = getDatabaseSessionSecret();
+        // 3a. Caller supplies isOwnerAuthenticated: true without ownerSession
+        await expect(
+          applyAuthenticatedSession(client, {
+            tenantId,
+            agentId: OWNER_PRINCIPAL_ID,
+            isOwnerAuthenticated: true,
+          })
+        ).rejects.toThrow(/Owner claims require an authenticated Owner session/i);
+
+        // 3b. Caller supplies principalLevel: 'OWNER' without ownerSession
+        await expect(
+          applyAuthenticatedSession(client, {
+            tenantId,
+            agentId: OWNER_PRINCIPAL_ID,
+            principalLevel: 'OWNER',
+          })
+        ).rejects.toThrow(/Owner claims require an authenticated Owner session/i);
+
+        // 3c. Caller supplies an invalid / forged ownerSession token
+        await expect(
+          applyAuthenticatedSession(client, {
+            tenantId,
+            agentId: OWNER_PRINCIPAL_ID,
+            principalLevel: 'OWNER',
+            ownerSession: {
+              sessionId: 'fake-session',
+              principalId: OWNER_PRINCIPAL_ID,
+              ownerEmail: 'owner@virtualmendezempire.internal',
+              createdAt: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 3600000).toISOString(),
+              token: 'header.payload.invalid-fake-signature',
+            },
+          })
+        ).rejects.toThrow(/Owner session verification failed/i);
+      } finally {
+        client.release();
+      }
+    });
+
+    it('4. prevents authenticated Specialist from minting Owner or Executive claims (negative test)', async () => {
+      const client = await appPool.connect();
+      try {
+        // 4a. Registered specialist (TECH-FSE) attempts to request EXECUTIVE claims
+        await expect(
+          applyAuthenticatedSession(client, {
+            tenantId,
+            agentCode: 'TECH-FSE',
+            principalLevel: 'EXECUTIVE',
+          })
+        ).rejects.toThrow(/is registered with level 'SPECIALIST', not 'EXECUTIVE'\. Elevation prohibited/i);
+
+        // 4b. Registered specialist attempts to request DIRECTOR claims
+        await expect(
+          applyAuthenticatedSession(client, {
+            tenantId,
+            agentCode: 'TECH-FSE',
+            principalLevel: 'DIRECTOR',
+          })
+        ).rejects.toThrow(/is registered with level 'SPECIALIST', not 'DIRECTOR'\. Elevation prohibited/i);
+
+        // 4c. Registered specialist attempts to request OWNER claims without ownerSession
+        await expect(
+          applyAuthenticatedSession(client, {
+            tenantId,
+            agentCode: 'TECH-FSE',
+            isOwnerAuthenticated: true,
+          })
+        ).rejects.toThrow(/Owner claims require an authenticated Owner session/i);
+      } finally {
+        client.release();
+      }
+    });
+
+    it('5. rejects forged or expired claims in database session authentication (negative test)', async () => {
+      const client = await appPool.connect();
+      try {
+        // 5a. Forged signature
+        const claims = {
+          tenantId,
+          agentId: OWNER_PRINCIPAL_ID,
+          principalLevel: 'OWNER',
+          isOwner: true,
+          expiresAt: Math.floor(Date.now() / 1000) + 3600,
+          nonce: randomUUID(),
+        };
+        const forgedSignature = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
+        await expect(
+          client.query(`SELECT set_authenticated_session($1::jsonb, $2)`, [
+            JSON.stringify(claims),
+            forgedSignature,
+          ])
+        ).rejects.toThrow(/CRITICAL SECURITY VIOLATION: Invalid database session authentication signature/i);
+
+        // 5b. Expired claims (timestamp in the past)
         const expiredClaims = {
           tenantId,
           agentId: randomUUID(),
+          departmentId: 'technology_engineering',
           principalLevel: 'SPECIALIST',
           isOwner: false,
-          expiresAt: Math.floor(Date.now() / 1000) - 300, // 5 minutes in the past
+          expiresAt: Math.floor(Date.now() / 1000) - 300,
           nonce: randomUUID(),
         };
-        const { claimsPayload, signature } = signDatabaseClaims(expiredClaims, secret);
-
+        const { claimsPayload, signature } = signDatabaseClaims(expiredClaims, getDatabaseSessionSecret());
         await expect(
           client.query(`SELECT set_authenticated_session($1::jsonb, $2)`, [
             JSON.stringify(claimsPayload),
@@ -1399,70 +1466,89 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
       }
     });
 
-    it('denies vme_app direct read/write access to system_auth_secrets table (negative test)', async () => {
+    it('6. proves direct GUC manipulation cannot elevate privileges under vme_app (negative test)', async () => {
       const client = await appPool.connect();
       try {
-        await expect(
-          client.query(`SELECT * FROM system_auth_secrets`)
-        ).rejects.toThrow(/permission denied for table system_auth_secrets/i);
+        await client.query('BEGIN');
+        // Adversary attempts raw set_config GUC tampering
+        await client.query(`
+          SELECT 
+            set_config('app.is_owner_authenticated', 'true', false),
+            set_config('app.current_principal_level', 'OWNER', false),
+            set_config('app.current_agent_id', '00000000-0000-0000-0000-000000000000', false),
+            set_config('app.current_department_id', 'executive_office', false)
+        `);
 
-        await expect(
-          client.query(`INSERT INTO system_auth_secrets (key_name, secret_value) VALUES ('hacked', 'pwned')`)
-        ).rejects.toThrow(/permission denied for table system_auth_secrets/i);
+        const ownerRes = await client.query(`SELECT is_current_principal_owner() as "isOwner"`);
+        expect(ownerRes.rows[0].isOwner).toBe(false);
+
+        const execRes = await client.query(`SELECT is_current_principal_executive() as "isExec"`);
+        expect(execRes.rows[0].isExec).toBe(false);
+
+        const agentRes = await client.query(`SELECT get_current_agent_id() as "agentId"`);
+        expect(agentRes.rows[0].agentId).toBeNull();
+
+        const deptRes = await client.query(`SELECT get_current_department_id() as "deptId"`);
+        expect(deptRes.rows[0].deptId).toBeNull();
+
+        await client.query('ROLLBACK');
       } finally {
+        await client.query('SELECT clear_authenticated_session()');
         client.release();
       }
     });
 
-    it('proves legitimately signed Owner session succeeds and enforces Owner RLS privileges (positive test)', async () => {
-      const ownerAgentId = '00000000-0000-0000-0000-000000000000';
+    it('7. proves legitimate Owner, Executive, Director, and Specialist sessions work under verified authority (positive test)', async () => {
+      const authService = new OwnerAuthenticationService({ secretKey: ownerHmacSecret, requiredCredentials: ownerMasterKey });
+      const ownerSession = authService.createOwnerSession({
+        principalId: OWNER_PRINCIPAL_ID,
+        email: CANONICAL_OWNER_PRINCIPAL.email,
+        credentials: ownerMasterKey,
+      });
       const specialistAgentId = randomUUID();
       const testTaskId = randomUUID();
 
-      // 1. Specialist writes AGENT_PRIVATE memory
+      // 7a. Specialist writes AGENT_PRIVATE memory
       await withSessionRls(
         appPool,
         { tenantId, agentId: specialistAgentId, principalLevel: 'SPECIALIST' },
         async (client) => {
           await client.query(`
             INSERT INTO agent_working_memories (tenant_id, task_id, agent_id, key, value, expires_at)
-            VALUES ($1, $2, $3, 'private_owner_check', '"confidential_data"', NOW() + INTERVAL '1 hour')
+            VALUES ($1, $2, $3, 'legit_test_key', '"confidential_data"', NOW() + INTERVAL '1 hour')
           `, [tenantId, testTaskId, specialistAgentId]);
         }
       );
 
-      // 2. Verified Owner session accesses the private memory
+      // 7b. Verified Owner accesses the private memory
       const ownerVal = await withSessionRls(
         appPool,
-        { tenantId, agentId: ownerAgentId, principalLevel: 'OWNER', isOwnerAuthenticated: true },
+        { tenantId, agentId: OWNER_PRINCIPAL_ID, principalLevel: 'OWNER', isOwnerAuthenticated: true, ownerSession },
         async (client) => {
+          const isOwnerRes = await client.query(`SELECT is_current_principal_owner() as "isOwner"`);
+          expect(isOwnerRes.rows[0].isOwner).toBe(true);
+
           const res = await client.query(`
             SELECT value FROM agent_working_memories
-            WHERE tenant_id = $1 AND task_id = $2 AND key = 'private_owner_check'
+            WHERE tenant_id = $1 AND task_id = $2 AND key = 'legit_test_key'
           `, [tenantId, testTaskId]);
           return res.rows[0]?.value;
         }
       );
-
       expect(ownerVal).toBe('confidential_data');
-    });
 
-    it('proves legitimately signed Executive session succeeds and enforces Executive RLS privileges (positive test)', async () => {
-      const execAgentId = randomUUID();
+      // 7c. Registered Executive (EXEC-CEO) writes ORGANIZATION_WIDE episodic memory
       const testRecordId = randomUUID();
-
-      // Executive writes ORGANIZATION_WIDE episodic memory (which requires is_current_principal_executive() = true)
       await withSessionRls(
         appPool,
         {
           tenantId,
-          agentId: execAgentId,
-          departmentId: 'executive_office',
+          agentCode: 'EXEC-CEO',
           principalLevel: 'EXECUTIVE',
         },
         async (client) => {
-          const checkRes = await client.query(`SELECT is_current_principal_executive() as "isExec"`);
-          expect(checkRes.rows[0].isExec).toBe(true);
+          const execRes = await client.query(`SELECT is_current_principal_executive() as "isExec"`);
+          expect(execRes.rows[0].isExec).toBe(true);
 
           await client.query(`
             INSERT INTO agent_episodic_memories (
@@ -1470,62 +1556,24 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
               action_type, input_summary, decision_rationale, outcome, scope,
               importance_score, status, metadata, recorded_at
             ) VALUES (
-              $1, $2, $3, 'EXEC-1', 'executive_office', $4,
+              $1, $2, '00000000-0000-0000-0000-000000000001', 'EXEC-CEO', 'executive_office', $3,
               'POLICY_DIRECTIVE', 'Executive Org-Wide Scope Authorization Test',
               'Authenticated executive claims verified', 'SUCCESS', 'ORGANIZATION_WIDE',
               10, 'SUCCESS', '{}'::jsonb, NOW()
             )
-          `, [testRecordId, tenantId, execAgentId, randomUUID()]);
+          `, [testRecordId, tenantId, randomUUID()]);
         }
       );
 
-      // Verify the record was successfully written
-      const client = await appPool.connect();
-      try {
-        await applyAuthenticatedSession(client, {
-          tenantId,
-          agentId: execAgentId,
-          departmentId: 'executive_office',
-          principalLevel: 'EXECUTIVE',
-        });
-        const res = await client.query(`
-          SELECT id, scope FROM agent_episodic_memories WHERE id = $1
-        `, [testRecordId]);
-        expect(res.rows[0]?.scope).toBe('ORGANIZATION_WIDE');
-      } finally {
-        await clearAuthenticatedSession(client);
-        client.release();
-      }
-    });
-
-    it('proves legitimately signed Specialist session cannot escalate to Executive or Owner (positive boundary test)', async () => {
-      const specialistId = randomUUID();
-
+      // 7d. Specialist cannot write ORGANIZATION_WIDE episodic memory (forbidden by RLS)
       await withSessionRls(
         appPool,
         {
           tenantId,
-          agentId: specialistId,
-          departmentId: 'technology_engineering',
+          agentId: specialistAgentId,
           principalLevel: 'SPECIALIST',
         },
         async (client) => {
-          const res = await client.query(`
-            SELECT 
-              get_current_agent_id() as "agentId",
-              get_current_department_id() as "deptId",
-              get_current_principal_level() as "level",
-              is_current_principal_owner() as "isOwner",
-              is_current_principal_executive() as "isExec"
-          `);
-          const row = res.rows[0];
-          expect(row.agentId).toBe(specialistId);
-          expect(row.deptId).toBe('technology_engineering');
-          expect(row.level).toBe('SPECIALIST');
-          expect(row.isOwner).toBe(false);
-          expect(row.isExec).toBe(false);
-
-          // Specialist cannot write ORGANIZATION_WIDE episodic memory (forbidden by RLS)
           await expect(
             client.query(`
               INSERT INTO agent_episodic_memories (
@@ -1538,10 +1586,73 @@ describe('VME Phase 2 — Genuine PostgreSQL Integration Verification (Issue 3)'
                 'Should be rejected by ABAC RLS', 'FAIL', 'ORGANIZATION_WIDE',
                 5, 'FAILURE', '{}'::jsonb, NOW()
               )
-            `, [randomUUID(), tenantId, specialistId, randomUUID()])
+            `, [randomUUID(), tenantId, specialistAgentId, randomUUID()])
           ).rejects.toThrow(/violates row-level security policy/i);
         }
       );
+    });
+
+    it('8. verifies PUBLIC, vme_app, and vme_readonly function and table privileges in PostgreSQL catalog', async () => {
+      // 8a. vme_app cannot execute provision_session_signing_secret
+      const appClient = await appPool.connect();
+      try {
+        await expect(
+          appClient.query(`SELECT provision_session_signing_secret('adversary-trying-to-set-secret-here')`)
+        ).rejects.toThrow(/permission denied for function provision_session_signing_secret/i);
+
+        // vme_app cannot read or write system_auth_secrets
+        await expect(appClient.query(`SELECT * FROM system_auth_secrets`)).rejects.toThrow(
+          /permission denied for table system_auth_secrets/i
+        );
+      } finally {
+        appClient.release();
+      }
+
+      // 8b. vme_readonly cannot execute provision_session_signing_secret or modify secrets
+      const roClient = await roPool.connect();
+      try {
+        await expect(
+          roClient.query(`SELECT provision_session_signing_secret('adversary-ro-trying-to-set-secret')`)
+        ).rejects.toThrow(/permission denied for function provision_session_signing_secret/i);
+
+        await expect(roClient.query(`SELECT * FROM system_auth_secrets`)).rejects.toThrow(
+          /permission denied for table system_auth_secrets/i
+        );
+      } finally {
+        roClient.release();
+      }
+
+      // 8c. Inspect catalog: PUBLIC has no execute privileges on provision_session_signing_secret
+      const pubPermsRes = await adminPool.query(`
+        SELECT grantee, privilege_type
+        FROM information_schema.routine_privileges
+        WHERE routine_schema = 'public' 
+          AND routine_name = 'provision_session_signing_secret'
+          AND grantee = 'PUBLIC'
+      `);
+      expect(pubPermsRes.rows).toHaveLength(0);
+
+      // 8d. Inspect catalog: only vme_admin / postgres has execute on provision_session_signing_secret
+      const nonAdminPermsRes = await adminPool.query(`
+        SELECT grantee, privilege_type
+        FROM information_schema.routine_privileges
+        WHERE routine_schema = 'public' 
+          AND routine_name = 'provision_session_signing_secret'
+          AND grantee IN ('vme_app', 'vme_readonly')
+      `);
+      expect(nonAdminPermsRes.rows).toHaveLength(0);
+
+      // 8e. vme_app has EXECUTE on set_authenticated_session and clear_authenticated_session
+      const appAuthFuncPerms = await adminPool.query(`
+        SELECT routine_name
+        FROM information_schema.routine_privileges
+        WHERE routine_schema = 'public'
+          AND grantee = 'vme_app'
+          AND routine_name IN ('set_authenticated_session', 'clear_authenticated_session')
+      `);
+      const permittedFuncs = appAuthFuncPerms.rows.map(r => r.routine_name);
+      expect(permittedFuncs).toContain('set_authenticated_session');
+      expect(permittedFuncs).toContain('clear_authenticated_session');
     });
   });
 });

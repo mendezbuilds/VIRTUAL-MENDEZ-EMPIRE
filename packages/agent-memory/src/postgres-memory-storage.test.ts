@@ -21,6 +21,7 @@ describe('Postgres Memory Storage & Adversarial RLS / Isolation Tests', () => {
   const agentB = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
   beforeEach(() => {
+    process.env.DB_SESSION_SECRET = 'test-secret-with-at-least-32-chars-entropy-abc123';
     const db = newDb();
 
     db.public.registerEquivalentType({

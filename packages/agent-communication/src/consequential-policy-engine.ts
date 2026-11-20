@@ -670,9 +670,8 @@ export class ConsequentialPolicyEngine {
       try {
         await applyAuthenticatedSession(client, {
           tenantId: this.tenantId,
-          agentId: OWNER_PRINCIPAL_ID,
-          principalLevel: 'OWNER',
-          isOwnerAuthenticated: true,
+          agentCode: 'EXEC-CEO',
+          principalLevel: 'EXECUTIVE',
         });
 
         const res = await client.query(
@@ -727,9 +726,8 @@ export class ConsequentialPolicyEngine {
       try {
         await applyAuthenticatedSession(client, {
           tenantId: this.tenantId,
-          agentId: OWNER_PRINCIPAL_ID,
-          principalLevel: 'OWNER',
-          isOwnerAuthenticated: true,
+          agentCode: 'EXEC-CEO',
+          principalLevel: 'EXECUTIVE',
         });
 
         const res = await client.query(
@@ -777,9 +775,8 @@ export class ConsequentialPolicyEngine {
       try {
         await applyAuthenticatedSession(client, {
           tenantId: this.tenantId,
-          agentId: OWNER_PRINCIPAL_ID,
-          principalLevel: 'OWNER',
-          isOwnerAuthenticated: true,
+          agentCode: 'EXEC-CEO',
+          principalLevel: 'EXECUTIVE',
         });
 
         const res = await client.query(
@@ -819,9 +816,8 @@ export class ConsequentialPolicyEngine {
       try {
         await applyAuthenticatedSession(client, {
           tenantId: this.tenantId,
-          agentId: OWNER_PRINCIPAL_ID,
-          principalLevel: 'OWNER',
-          isOwnerAuthenticated: true,
+          agentCode: 'EXEC-CEO',
+          principalLevel: 'EXECUTIVE',
         });
 
         await client.query(

@@ -49,6 +49,7 @@ describe('VME Phase 2 — Production Integration & Complete Corporate Lifecycle'
   const tenantId = '00000000-0000-0000-0000-000000000001';
 
   beforeEach(() => {
+    process.env.DB_SESSION_SECRET = 'test-secret-with-at-least-32-chars-entropy-abc123';
     process.env.OWNER_AUTH_SECRET = 'vme-canonical-owner-hmac-secret-test-32b-length';
     process.env.OWNER_AUTH_CREDENTIALS = 'vme-owner-secure-cryptographic-master-key-2026';
     testSandboxDir = mkdtempSync(join(tmpdir(), 'vme-prod-test-'));
